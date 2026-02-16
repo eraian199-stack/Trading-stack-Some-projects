@@ -1,0 +1,82 @@
+{
+  "project": {
+    "currency": "BDT",
+    "total_project_cost": 4500000000,
+    "starting_noi": 420000000,
+    "hold_years": 7,
+    "annual_capex": 35000000,
+    "exit_transaction_cost_pct": 0.02,
+    "distress_sale_haircut_pct": 0.12,
+    "hurdle_irr": 0.14
+  },
+  "debt": {
+    "senior": {
+      "initial_ltv": 0.55,
+      "spread_bps": 350,
+      "amort_years": 20,
+      "maturity_year": 3
+    },
+    "mezz": {
+      "initial_ltv": 0.1,
+      "spread_bps": 700,
+      "maturity_year": 7
+    }
+  },
+  "covenants": {
+    "min_dscr": 1.1,
+    "max_ltv": 0.78
+  },
+  "refinancing": {
+    "max_ltv": 0.62,
+    "min_dscr": 1.25,
+    "required_coverage_ratio": 0.95,
+    "refi_spread_bps": 420
+  },
+  "macro": {
+    "base_short_rate": 0.09,
+    "short_rate_kappa": 0.35,
+    "short_rate_theta": 0.1,
+    "short_rate_sigma": 0.018,
+    "base_inflation": 0.065,
+    "inflation_mean_reversion": 0.5,
+    "inflation_sigma": 0.02
+  },
+  "market": {
+    "rent_growth_base": 0.07,
+    "rent_growth_sigma": 0.035,
+    "rent_inflation_beta": 0.5,
+    "rent_demand_beta": 0.35,
+    "opex_inflation_drag": 0.55,
+    "cap_rate_base": 0.09,
+    "cap_rate_sigma": 0.009,
+    "cap_rate_rate_beta": 0.45,
+    "demand_mean": 0.0,
+    "demand_sigma": 0.08
+  },
+  "scenarios": {
+    "base": {
+      "rent_growth_shift": 0.0,
+      "cap_rate_shift": 0.0,
+      "rate_shift": 0.0,
+      "inflation_shift": 0.0,
+      "liquidity_haircut": 0.0,
+      "shock_scale": 1.0
+    },
+    "stress": {
+      "rent_growth_shift": -0.03,
+      "cap_rate_shift": 0.015,
+      "rate_shift": 0.02,
+      "inflation_shift": 0.015,
+      "liquidity_haircut": 0.12,
+      "shock_scale": 1.25
+    },
+    "severe": {
+      "rent_growth_shift": -0.055,
+      "cap_rate_shift": 0.03,
+      "rate_shift": 0.035,
+      "inflation_shift": 0.025,
+      "liquidity_haircut": 0.25,
+      "shock_scale": 1.55
+    }
+  }
+}
