@@ -1,0 +1,29 @@
+date,home_team,away_team,home_score,away_score,tournament,city,country,neutral
+2024-01-10,Team A1,Team A2,2,0,Friendly,Sample City,Sampleland,true
+2024-01-11,Team B1,Team B2,1,1,Friendly,Sample City,Sampleland,true
+2024-01-12,Team C1,Team C2,0,1,Friendly,Sample City,Sampleland,true
+2024-01-13,Team D1,Team D2,3,1,Friendly,Sample City,Sampleland,true
+2024-02-10,Team A1,Team B1,1,0,Friendly,Sample City,Sampleland,true
+2024-02-11,Team A2,Team B2,0,0,Friendly,Sample City,Sampleland,true
+2024-02-12,Team C1,Team D1,2,2,Friendly,Sample City,Sampleland,true
+2024-02-13,Team C2,Team D2,1,2,Friendly,Sample City,Sampleland,true
+2024-03-10,Team A1,Team C1,2,1,Continental championship,Sample City,Sampleland,true
+2024-03-11,Team B1,Team D1,0,2,Continental championship,Sample City,Sampleland,true
+2024-03-12,Team A2,Team C2,1,3,Continental championship,Sample City,Sampleland,true
+2024-03-13,Team B2,Team D2,2,1,Continental championship,Sample City,Sampleland,true
+2024-06-10,Team A1,Team D1,1,1,FIFA World Cup qualification,Sample City,Sampleland,true
+2024-06-11,Team B1,Team C1,2,0,FIFA World Cup qualification,Sample City,Sampleland,true
+2024-06-12,Team A2,Team D2,0,1,FIFA World Cup qualification,Sample City,Sampleland,true
+2024-06-13,Team B2,Team C2,1,1,FIFA World Cup qualification,Sample City,Sampleland,true
+2025-01-10,Team A1,Team B2,3,0,Friendly,Sample City,Sampleland,true
+2025-01-11,Team D1,Team C2,2,1,Friendly,Sample City,Sampleland,true
+2025-01-12,Team B1,Team A2,1,0,Friendly,Sample City,Sampleland,true
+2025-01-13,Team D2,Team C1,0,0,Friendly,Sample City,Sampleland,true
+2025-06-10,Team A1,Team C2,1,2,FIFA World Cup qualification,Sample City,Sampleland,true
+2025-06-11,Team D1,Team A2,2,0,FIFA World Cup qualification,Sample City,Sampleland,true
+2025-06-12,Team B1,Team D2,1,1,FIFA World Cup qualification,Sample City,Sampleland,true
+2025-06-13,Team C1,Team B2,2,2,FIFA World Cup qualification,Sample City,Sampleland,true
+2026-03-10,Team A1,Team D2,2,1,Friendly,Sample City,Sampleland,true
+2026-03-11,Team D1,Team B2,2,0,Friendly,Sample City,Sampleland,true
+2026-03-12,Team B1,Team C2,0,1,Friendly,Sample City,Sampleland,true
+2026-03-13,Team A2,Team C1,1,1,Friendly,Sample City,Sampleland,true

@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# OS
+.DS_Store
+
+# Local IDE / Claude config (machine-specific: absolute paths, local settings)
+.claude/
+
+# Virtualenvs
+.venv/
+venv/
+
+# Generated / downloaded (regenerable, can be large; not part of the stack)
+data/cache/
+outputs/
+
+# Original uploaded reference framework (inputs that were merged into the stack)
+docs/files/
+docs/files.zip

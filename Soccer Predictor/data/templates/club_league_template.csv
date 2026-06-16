@@ -1,0 +1,3 @@
+match_id,date,competition,competition_type,season,stage,round,group,home_team,away_team,home_score,away_score,neutral_site,venue,city,country,home_odds,draw_odds,away_odds,closing_home_odds,closing_draw_odds,closing_away_odds,home_xg,away_xg
+SAMPLE-1,2024-08-17,SAMPLE League (not real),club_league,2024-25,regular,1,,Sample United FC (not real),Sample City FC (not real),2,1,false,Sample Stadium,Sampletown,Sampleland,2.10,3.40,3.60,2.05,3.45,3.70,1.85,1.10
+SAMPLE-2,2024-08-18,SAMPLE League (not real),club_league,2024-25,regular,1,,Sample Rovers FC (not real),Sample Athletic FC (not real),0,0,false,Rovers Park,Sampleburg,Sampleland,2.50,3.20,2.90,2.55,3.25,2.85,0.95,1.05

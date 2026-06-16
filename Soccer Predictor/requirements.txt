@@ -1,0 +1,22 @@
+# Core (required)
+numpy>=1.24
+pandas>=2.0
+scipy>=1.10
+scikit-learn>=1.3
+plotly>=5.18
+streamlit>=1.32
+
+# Optional: stronger gradient boosting. If absent, the gradient-boosting model
+# automatically falls back to scikit-learn's HistGradientBoostingClassifier.
+# lightgbm>=4.0
+
+# Optional: free xG ingestion from Understat (top-5 European leagues + RFPL).
+# As of mid-2026 Understat is the practical free xG source (FBref removed xG on
+# 2026-01-20). Without it you can still run everything on goals + odds.
+# understatapi>=0.5
+
+# Optional all-in-one scraper alternative (Understat + ClubElo + football-data):
+# soccerdata>=1.9
+
+# Tests
+# pytest>=8.0
