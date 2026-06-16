@@ -29,6 +29,7 @@ import plotly.express as px
 import streamlit as st
 
 from ..data import loaders, odds_api, schemas, sources, synthetic, world_cup
+from ..data.aliases import normalize_team_name
 from ..evaluation import betting, metrics, reports, walk_forward
 from ..features.market import implied_probabilities
 from ..models import DixonColes, EloGoalsModel, PoissonXG, default_ensemble
@@ -62,6 +63,8 @@ def load_data(source_kind: str, source_value: str, synthetic_kind: str) -> pd.Da
     ``source_kind`` is "Synthetic" or "Local file/dir"; the result is cached on
     the (kind, value) key so re-renders do not re-read or re-download.
     """
+    if source_kind == "International (live)":
+        return sources.fetch_international_results()
     if source_kind == "Synthetic":
         if synthetic_kind == "International":
             return synthetic.generate_international_history()
@@ -109,30 +112,41 @@ def _data_key(source_kind: str, source_value: str, synthetic_kind: str) -> str:
 def _sidebar() -> dict:
     st.sidebar.header("Data")
     source_kind = st.sidebar.radio(
-        "Source", ["Synthetic", "Local file/dir"], index=0,
-        help="Synthetic = clearly-labelled demo data. Local = a canonical / "
-        "football-data / martj42 international CSV or directory.",
+        "Source",
+        ["International (live)", "Synthetic", "Local file/dir"],
+        index=0,
+        help="International (live) = real national-team results (martj42), fit on "
+        "the full history — the World Cup setting. Synthetic = labelled demo data. "
+        "Local = a canonical / football-data / martj42 CSV or directory.",
     )
     synthetic_kind = "League"
     source_value = ""
     if source_kind == "Synthetic":
         synthetic_kind = st.sidebar.radio(
-            "Synthetic kind", ["League", "International"], index=0
+            "Synthetic kind", ["League", "International"], index=1
         )
-    else:
+    elif source_kind == "Local file/dir":
         source_value = st.sidebar.text_input(
             "CSV file or directory", value="data/templates/club_league_template.csv"
         )
 
     st.sidebar.header("Model")
-    model_label = st.sidebar.selectbox(
-        "Model", list(MODEL_FACTORIES), index=1,
-        help="Elo (robust default), Dixon-Coles (MLE goals), xG-Poisson "
-        "(needs xG columns), or the 4-model Ensemble.",
-    )
+    if source_kind == "International (live)":
+        # Dixon-Coles / xG / Ensemble are club models (DC's MLE over ~300 national
+        # teams is impractical), so the national-team setting uses Elo, the engine
+        # the World Cup backtests validated.
+        model_options = ["Elo"]
+        st.sidebar.caption(
+            "National-team engine: **Elo** (margin-weighted, backtested on past "
+            "World Cups). Dixon-Coles / xG suit club data — pick a club source to "
+            "use them."
+        )
+    else:
+        model_options = list(MODEL_FACTORIES)
+    model_label = st.sidebar.selectbox("Model", model_options, index=0)
 
     st.sidebar.header("Simulation")
-    sims = st.sidebar.slider("Simulations", 100, 20000, 2000, step=100)
+    sims = st.sidebar.slider("Simulations", 100, 20000, 5000, step=100)
     seed = int(st.sidebar.number_input("Seed", min_value=0, value=7, step=1))
 
     return {
@@ -149,18 +163,36 @@ def _sidebar() -> dict:
 # --------------------------------------------------------------------------- #
 # Tabs
 # --------------------------------------------------------------------------- #
+def _team_index(teams: list[str], prefs: list[str], fallback: int) -> int:
+    for p in prefs:
+        if p in teams:
+            return teams.index(p)
+    return min(fallback, len(teams) - 1)
+
+
 def _tab_match(df: pd.DataFrame, cfg: dict) -> None:
     st.subheader("Match Predictor")
+    intl = cfg["source_kind"] == "International (live)"
     teams = sorted(set(df["home_team"]) | set(df["away_team"]))
     if len(teams) < 2:
         st.info("Need at least two teams in the data.")
         return
 
     c1, c2, c3 = st.columns([1, 1, 1])
-    home = c1.selectbox("Home (listed) team", teams, index=0)
-    away = c2.selectbox("Away team", teams, index=min(1, len(teams) - 1))
-    neutral = c3.toggle("Neutral venue", value=False)
+    home = c1.selectbox(
+        "Home (listed) team", teams,
+        index=_team_index(teams, ["Brazil", "Argentina", "Spain"], 0),
+    )
+    away = c2.selectbox(
+        "Away team", teams,
+        index=_team_index(teams, ["France", "England", "Germany"], 1),
+    )
+    # World Cup / international matches are neutral by default; clubs are not.
+    neutral = c3.toggle("Neutral venue", value=intl)
     ou_line = c3.number_input("Over/under line", value=2.5, step=0.5)
+    if home == away:
+        st.info("Pick two different teams.")
+        return
 
     model = fit_model(
         cfg["model_label"],
@@ -210,6 +242,74 @@ def _tab_match(df: pd.DataFrame, cfg: dict) -> None:
     )
     st.dataframe(score_df, use_container_width=True, hide_index=True)
 
+    # Live market comparison for this exact fixture (if a book is pricing it now).
+    market = _market_for_fixture(home, away)
+    st.divider()
+    st.markdown("**Model vs the live market**")
+    if market is None:
+        st.caption(
+            "No live market line for this fixture right now (the book only prices "
+            "near-term games, and an Odds API key must be set). The fair odds above "
+            "are the model's own."
+        )
+    else:
+        model_p = [bundle["home_win"], bundle["draw"], bundle["away_win"]]
+        labels = ["Home", "Draw", "Away"]
+        rows = []
+        for i, lab in enumerate(labels):
+            edge = model_p[i] * market["odds"][i] - 1.0
+            rows.append({
+                "selection": lab,
+                "model_prob": round(model_p[i], 3),
+                "market_prob": round(float(market["market"][i]), 3),
+                "best_odds": market["odds"][i],
+                "edge": round(edge, 3),
+            })
+        mdf = pd.DataFrame(rows)
+        st.dataframe(mdf, use_container_width=True, hide_index=True)
+        best = mdf.loc[mdf["edge"].idxmax()]
+        suspect = (
+            best["market_prob"] < 0.08 or best["best_odds"] > 12.0
+            or abs(best["model_prob"] - best["market_prob"]) > 0.10
+            or best["model_prob"] > 0.95
+        )
+        if best["edge"] > 0.05 and not suspect:
+            st.success(f"Model sees value on **{best['selection']}** "
+                       f"(edge {best['edge']:+.1%}). Hypothesis only — beat the "
+                       f"closing line before trusting it.")
+        elif best["edge"] > 0.05:
+            st.warning(f"Largest 'edge' is on {best['selection']} ({best['edge']:+.1%}) "
+                       "but it looks like model miscalibration (longshot / big "
+                       "divergence), not real value.")
+        else:
+            st.caption("No qualifying edge — the model agrees with the book here.")
+
+
+def _market_for_fixture(home: str, away: str):
+    """Live de-vigged market + best odds for a fixture, or None if not priced.
+
+    Matches the fixture in either listing order (swapping home/away odds when the
+    book lists the tie the other way round). Returns {market: [H,D,A] probs,
+    odds: (oh,od,oa)} for the home/away as queried.
+    """
+    if odds_api.load_odds_api_key() is None:
+        return None
+    try:
+        odds = _live_odds(odds_api.WORLD_CUP_SPORT, "best")
+    except Exception:
+        return None
+    if odds.empty:
+        return None
+    h, a = normalize_team_name(home), normalize_team_name(away)
+    for r in odds.itertuples(index=False):
+        if r.home_team == h and r.away_team == a:
+            oh, od, oa = r.home_odds, r.draw_odds, r.away_odds
+            return {"market": implied_probabilities(oh, od, oa), "odds": (oh, od, oa)}
+        if r.home_team == a and r.away_team == h:  # reversed listing -> swap H/A
+            oa, od, oh = r.home_odds, r.draw_odds, r.away_odds
+            return {"market": implied_probabilities(oh, od, oa), "odds": (oh, od, oa)}
+    return None
+
 
 def _tab_tournament(df: pd.DataFrame, cfg: dict) -> None:
     st.subheader("Tournament Simulator")
@@ -219,11 +319,22 @@ def _tab_tournament(df: pd.DataFrame, cfg: dict) -> None:
     fmt = rules.world_cup_2026_format()
     st.caption(f"Format: {fmt.name}.  Assumptions: {fmt.notes}")
 
+    # Default to the real, verified WC 2026 draw + fixtures (with played results)
+    # when they exist; otherwise the placeholder template. The dedicated
+    # "🏆 World Cup 2026 (live)" tab does this end-to-end with the market anchor.
+    import os as _os
+
+    _real_groups = "data/world_cup_2026_groups.csv"
+    _real_fixtures = "data/world_cup_2026_fixtures.csv"
     groups_path = st.text_input(
         "Groups CSV (group,team)",
-        value="data/templates/world_cup_2026_groups_template.csv",
+        value=_real_groups if _os.path.exists(_real_groups)
+        else "data/templates/world_cup_2026_groups_template.csv",
     )
-    fixtures_path = st.text_input("Fixtures CSV (optional)", value="")
+    fixtures_path = st.text_input(
+        "Fixtures CSV (optional, locks in played results)",
+        value=_real_fixtures if _os.path.exists(_real_fixtures) else "",
+    )
 
     if not st.button("Run tournament simulation", type="primary"):
         st.info("Set a group draw and press the button to Monte-Carlo the tournament.")
