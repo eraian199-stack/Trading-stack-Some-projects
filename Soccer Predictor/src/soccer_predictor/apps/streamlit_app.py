@@ -545,19 +545,34 @@ def _live_history() -> pd.DataFrame:
     return sources.fetch_international_results()
 
 
+@st.cache_data(show_spinner="Fetching live results...", ttl=900)
+def _live_scores() -> pd.DataFrame:
+    """Live completed-match scores from the Odds API (martj42 lags), or empty."""
+    try:
+        return odds_api.fetch_scores()
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(show_spinner="Assembling live training data...", ttl=900)
+def _live_train() -> pd.DataFrame:
+    """Completed history + live Odds-API results (so the model sees today's games)."""
+    return world_cup.live_training_frame(use_odds_api_scores=True)
+
+
 @st.cache_resource(show_spinner="Fitting model on real history...")
-def _live_model(model_label: str, n_matches: int) -> object:
-    del n_matches  # cache key only; forces a refit when the history grows
+def _live_model(model_label: str, n_train: int) -> object:
+    del n_train  # cache key only; a new live result grows the frame -> refit
     factory = MODEL_FACTORIES[model_label]
-    return factory().fit(schemas.completed_matches(_live_history()).copy())
+    return factory().fit(_live_train().copy())
 
 
-@st.cache_data(show_spinner="Simulating World Cup 2026...", ttl=1800)
-def _live_wc(model_label: str, n_sims: int, n_matches: int, anchor: bool) -> pd.DataFrame:
-    del n_matches
-    model = _live_model(model_label, _live_history_len())
+@st.cache_data(show_spinner="Simulating World Cup 2026...", ttl=900)
+def _live_wc(model_label: str, n_sims: int, anchor: bool, n_train: int) -> pd.DataFrame:
+    model = _live_model(model_label, n_train)
     groups = world_cup.load_groups()
-    world_cup.build_fixtures(_live_history(), groups)
+    # Lock in games already played (history + live Odds-API results).
+    world_cup.build_fixtures(_live_history(), groups, extra_results=_live_scores())
     fixtures = loaders.load_fixtures(str(world_cup.FIXTURES_CSV))
     if anchor:
         from ..models.market_anchor import MarketAnchoredModel
@@ -573,10 +588,6 @@ def _live_wc(model_label: str, n_sims: int, n_matches: int, anchor: bool) -> pd.
     return simulate_tournament(model, groups, fixtures=fixtures, n_simulations=n_sims)
 
 
-def _live_history_len() -> int:
-    return len(_live_history())
-
-
 @st.cache_data(show_spinner="Fetching live odds...", ttl=900)
 def _live_odds(sport: str, aggregate: str) -> pd.DataFrame:
     return odds_api.fetch_match_odds(sport=sport, aggregate=aggregate)
@@ -585,9 +596,9 @@ def _live_odds(sport: str, aggregate: str) -> pd.DataFrame:
 def _tab_world_cup() -> None:
     st.subheader("World Cup 2026 — live")
     st.caption(
-        "Real groups (verified vs the actual fixtures), real results locked in as "
-        "they are played, and the rest Monte-Carlo'd. Model is fit on real "
-        "international history through today."
+        "Real groups (verified vs the actual fixtures); games already played are "
+        "locked in (martj42 history + live Odds-API results, since martj42 lags); "
+        "the rest is Monte-Carlo'd from the model fit on real history through today."
     )
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
     model_label = c1.selectbox("Model", list(MODEL_FACTORIES), key="wc_model")
@@ -598,22 +609,32 @@ def _tab_world_cup() -> None:
         "(the strongest signal). Future knockout matchups use the pure model.",
     )
     go = c4.button("Run", type="primary")
+    if c4.button("🔄 Refresh live data"):
+        # Drop the cached results/odds/sim so a just-finished game flows in.
+        for fn in (_live_scores, _live_train, _live_wc, _live_odds):
+            try:
+                fn.clear()
+            except Exception:
+                pass
+        st.rerun()
     if not go:
-        st.info("Pick a model and run. First run downloads + caches real data, "
-                "then locks in the group games already played.")
+        st.info("Pick a model and run. First run downloads + caches real data, then "
+                "locks in the group games already played (incl. today's live results). "
+                "Use 🔄 Refresh after a match finishes.")
         return
     try:
-        n = _live_history_len()
+        n_train = len(_live_train())
         played = int(
-            world_cup.build_fixtures(_live_history(), world_cup.load_groups())
-            .pipe(lambda d: (d["home_score"] != "").sum())
+            world_cup.build_fixtures(
+                _live_history(), world_cup.load_groups(), extra_results=_live_scores()
+            ).pipe(lambda d: (d["home_score"] != "").sum())
         )
-        sims = _live_wc(model_label, n_sims, n, anchor)
+        sims = _live_wc(model_label, n_sims, anchor, n_train)
     except Exception as exc:
         st.error(f"Live World Cup pipeline failed: {exc}")
         return
     st.caption(
-        f"{played}/72 group games already played and locked in"
+        f"{played}/72 group games played and locked in (incl. live results)"
         + (" · anchored to live market odds" if anchor else " · pure model (no anchor)")
     )
     cols = st.columns(3)

@@ -217,9 +217,11 @@ def build_fixtures(
                 "away_score": "" if pd.isna(as_) else int(as_),
             }
         )
-    # Surface live results that matched NO fixture (usually a team-name mismatch),
-    # so a silently-dropped score never goes unnoticed.
-    dropped = sorted(set(extra_map) - used_extra)
+    # Surface live results whose (home, away) pair matches NO group fixture at all
+    # (a genuine team-name mismatch). Results that matched a fixture which already
+    # had a score from the history feed are NOT flagged -- they were simply not
+    # needed, not dropped.
+    dropped = sorted(k for k in extra_map if k not in fixture_pairs)
     if dropped:
         import sys
 
@@ -239,6 +241,38 @@ def build_fixtures(
 # --------------------------------------------------------------------------- #
 # One-call live simulation
 # --------------------------------------------------------------------------- #
+def live_training_frame(use_odds_api_scores: bool = True) -> pd.DataFrame:
+    """Completed international history, topped up with live Odds-API scores.
+
+    The martj42 feed lags (and is cached), so a game played today often is not in
+    it yet; the Odds API ``/scores`` endpoint has it within the hour. Merging the
+    two means both the locked-in fixtures AND the fitted model reflect results as
+    they happen. Live scores override history on the same fixture.
+    """
+    history = schemas.completed_matches(fetch_international_results())
+    if not use_odds_api_scores:
+        return history
+    try:
+        from . import odds_api
+
+        extra = odds_api.fetch_scores()
+    except Exception as exc:  # graceful: live scores are a bonus, not required
+        print(f"[world_cup] odds-api scores unavailable ({exc}); using history only.")
+        return history
+    if extra is None or len(extra) == 0:
+        return history
+    combined = pd.concat([history, schemas.completed_matches(extra)], ignore_index=True)
+    # Dedup on (date, teams) ONLY -- the same fixture on the same day is the
+    # duplicate to drop (keep the live row). Crucially this must include date:
+    # deduping on teams alone would collapse decades of repeated fixtures
+    # (e.g. every Brazil-vs-Argentina friendly) into one row and gut the history.
+    combined["_d"] = pd.to_datetime(combined["date"], errors="coerce").dt.normalize()
+    combined = combined.drop_duplicates(
+        subset=["_d", "home_team", "away_team"], keep="last"
+    ).drop(columns="_d")
+    return combined.sort_values("date", kind="mergesort").reset_index(drop=True)
+
+
 def simulate(
     model=None,
     *,
@@ -246,14 +280,16 @@ def simulate(
     n_simulations: int = 10000,
     seed: int = 7,
     refresh_groups_data: bool = False,
-    use_odds_api_scores: bool = False,
+    use_odds_api_scores: bool = True,
 ) -> pd.DataFrame:
-    """Fetch real data, condition on games played, and Monte-Carlo the rest.
+    """Fetch real data, condition on games PLAYED (incl. live results), and
+    Monte-Carlo the rest.
 
-    Returns the standard per-team stage/champion probability table. The model is
-    fit on ALL completed matches (history incl. games played so far) -- that is
-    past information relative to the matches still to be simulated, so it is not
-    leakage.
+    By default this tops up the (lagging, cached) martj42 history with live scores
+    from the Odds API, so a result like "France beat Senegal today" both LOCKS IN
+    that group game and updates the fitted model -- the probabilities move as
+    games are played. The model is fit on completed matches only (past info
+    relative to the games still being simulated, so no leakage).
     """
     from ..models import DixonColes, EloGoalsModel, PoissonXG, default_ensemble
     from ..simulation.tournament import simulate_tournament
@@ -270,7 +306,7 @@ def simulate(
         except Exception as exc:  # graceful: live scores are a bonus, not required
             print(f"[world_cup] odds-api scores unavailable ({exc}); using history only.")
 
-    fixtures_df = build_fixtures(history, groups, extra_results=extra)
+    build_fixtures(history, groups, extra_results=extra)
     fixtures = loaders.load_fixtures(str(FIXTURES_CSV))
 
     if model is None:
@@ -281,7 +317,7 @@ def simulate(
             "ensemble": default_ensemble,
         }.get(model_name, EloGoalsModel)
         model = factory()
-        model.fit(schemas.completed_matches(history).copy())
+        model.fit(live_training_frame(use_odds_api_scores).copy())
 
     return simulate_tournament(
         model, groups, fixtures=fixtures, n_simulations=n_simulations, seed=seed

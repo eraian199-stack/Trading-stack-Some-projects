@@ -11,11 +11,11 @@ match_id,date,group,home_team,away_team,neutral,home_score,away_score
 10,2026-06-14,E,Côte d'Ivoire,Ecuador,True,1,0
 11,2026-06-14,F,Netherlands,Japan,True,2,2
 12,2026-06-14,F,Sweden,Tunisia,True,5,1
-13,2026-06-15,G,Belgium,Egypt,True,,
-14,2026-06-15,G,Iran,New Zealand,True,,
-15,2026-06-15,H,Spain,Cabo Verde,True,,
-16,2026-06-15,H,Saudi Arabia,Uruguay,True,,
-17,2026-06-16,I,France,Senegal,True,,
+13,2026-06-15,G,Belgium,Egypt,True,1,1
+14,2026-06-15,G,Iran,New Zealand,True,2,2
+15,2026-06-15,H,Spain,Cabo Verde,True,0,0
+16,2026-06-15,H,Saudi Arabia,Uruguay,True,1,1
+17,2026-06-16,I,France,Senegal,True,3,1
 18,2026-06-16,I,Iraq,Norway,True,,
 19,2026-06-16,J,Argentina,Algeria,True,,
 20,2026-06-16,J,Austria,Jordan,True,,

@@ -425,7 +425,9 @@ def cmd_world_cup(args: argparse.Namespace) -> int:
         )
 
     # Build + fit the base model ourselves so we can attach overlays / the anchor.
-    history = schemas.completed_matches(sources.fetch_international_results())
+    # Train on history + live Odds-API results (martj42 lags) unless disabled, so
+    # the model reflects games played today.
+    history = world_cup.live_training_frame(use_odds_api_scores=not args.no_live_scores)
     if args.model == "elo":
         squad = None
         if args.squad_csv:
@@ -456,7 +458,7 @@ def cmd_world_cup(args: argparse.Namespace) -> int:
         n_simulations=args.sims,
         seed=args.seed,
         refresh_groups_data=args.refresh_groups,
-        use_odds_api_scores=args.live_scores,
+        use_odds_api_scores=not args.no_live_scores,
     )
     _print_table(table, args, head=args.top)
     return 0
@@ -941,9 +943,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Re-fetch the official group draw from Wikipedia (verified vs fixtures).",
     )
     p_wc.add_argument(
-        "--live-scores",
+        "--no-live-scores",
         action="store_true",
-        help="Top up results from the Odds API /scores endpoint (uses quota).",
+        help="Do NOT top up results from the Odds API /scores endpoint "
+        "(by default live results are merged, since martj42 lags).",
     )
     p_wc.add_argument(
         "--no-anchor",
