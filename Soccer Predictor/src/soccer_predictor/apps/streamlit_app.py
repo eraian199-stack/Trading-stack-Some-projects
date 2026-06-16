@@ -740,22 +740,10 @@ def main() -> None:
         _tab_betting(df, cfg)
 
 
-def _running_under_streamlit() -> bool:
-    """True only inside an actual ``streamlit run`` session.
-
-    Lets a plain ``import`` of this module (e.g. in tests / smoke checks) succeed
-    without trying to render a page outside a Streamlit runtime.
-    """
-    try:
-        from streamlit.runtime.scriptrunner import get_script_run_ctx
-
-        return get_script_run_ctx() is not None
-    except Exception:
-        return False
-
-
-# ``streamlit run <file>`` executes this script (as __main__ or as a module);
-# either way we render only when a real Streamlit runtime is present, so a bare
-# import for testing stays side-effect-free.
-if __name__ == "__main__" or _running_under_streamlit():
+# Entry point is app_unified.py, which calls main() explicitly on every Streamlit
+# rerun. This module must therefore NOT auto-run main() when it is *imported* (that
+# would render the app twice on the first run -> StreamlitDuplicateElementId, and
+# importing it for tests would have side effects). It only runs main() if executed
+# directly as a script (`python streamlit_app.py`), never on import.
+if __name__ == "__main__":  # pragma: no cover
     main()
