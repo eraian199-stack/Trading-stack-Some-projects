@@ -440,22 +440,42 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
 def _tab_betting(df: pd.DataFrame, cfg: dict) -> None:
     st.subheader("Betting Edge Scanner")
     st.warning(
-        "A POSITIVE ROI is a HYPOTHESIS, not proof of edge. It can be "
-        "overfitting, survivorship in the odds, or beating opening rather than "
-        "closing prices. Check the model's calibration (Backtest Lab) and "
-        "closing-line value before trusting any edge."
+        "A POSITIVE edge/ROI is a HYPOTHESIS, not proof. It can be overfitting, "
+        "survivorship in the odds, or beating opening rather than closing prices. "
+        "Check calibration (Backtest Lab) and closing-line value before trusting any edge."
     )
 
+    # 1) LIVE scan against The Odds API -- works for the World Cup regardless of
+    #    whether the loaded historical data carries odds.
+    model = fit_model(
+        cfg["model_label"],
+        _data_key(cfg["source_kind"], cfg["source_value"], cfg["synthetic_kind"]),
+        cfg["source_kind"], cfg["source_value"], cfg["synthetic_kind"],
+    )
+    if isinstance(model, ScorelineModel):
+        _live_odds_section(
+            model, neutral=cfg["source_kind"] == "International (live)"
+        )
+
+    # 2) Historical value-betting backtest -- only when the loaded data has odds
+    #    (club leagues / football-data). International history has none.
+    st.divider()
+    st.markdown("**Historical value-betting backtest (out-of-sample)**")
     if not schemas.has_usable_odds(df):
         st.info(
-            "This data has no usable 1X2 odds, so there is nothing to scan "
-            "against. Load a frame with home_odds / draw_odds / away_odds."
+            "The loaded data has no historical 1X2 odds (e.g. international results "
+            "have none free), so there is nothing to backtest here. Use the live "
+            "scan above for the World Cup, or load a club league (football-data, "
+            "which carries closing odds) to backtest value betting."
         )
         return
 
     c1, c2 = st.columns(2)
     edge = c1.slider("Edge threshold", 0.0, 0.30, 0.05, step=0.01)
     folds = int(c2.slider("Walk-forward folds", 2, 10, 5))
+    if not st.button("Run historical betting backtest", type="primary"):
+        st.caption("Press the button to backtest value betting on this data.")
+        return
 
     factory = MODEL_FACTORIES[cfg["model_label"]]
     with st.spinner("Scanning for value bets out-of-sample..."):
@@ -515,18 +535,6 @@ def _tab_betting(df: pd.DataFrame, cfg: dict) -> None:
     edge_df = edge_df[edge_df["edge"] > edge].sort_values("edge", ascending=False)
     st.caption(f"Qualifying value selections (edge > {edge:.0%})")
     st.dataframe(edge_df, use_container_width=True, hide_index=True)
-
-    # Live upcoming-fixture scan against The Odds API.
-    st.divider()
-    model = fit_model(
-        cfg["model_label"],
-        _data_key(cfg["source_kind"], cfg["source_value"], cfg["synthetic_kind"]),
-        cfg["source_kind"],
-        cfg["source_value"],
-        cfg["synthetic_kind"],
-    )
-    if isinstance(model, ScorelineModel):
-        _live_odds_section(model, neutral=True)
 
 
 # --------------------------------------------------------------------------- #
