@@ -1,21 +1,27 @@
 """
 World Cup backtesting.
 
-The honest way to decide which national-team variables actually help is to score
-them out-of-sample on PAST World Cups, not to assert. Two backtests:
+The honest way to decide whether the model predicts well -- and which national-
+team variables actually help -- is to score it out-of-sample on PAST World Cups
+(default back to 1998, the start of the 32-team era), not to assert. Backtests:
 
-1. ``backtest_world_cups`` (the workhorse) -- MATCH-LEVEL proper scoring. For each
-   edition, fit a model on all completed international matches BEFORE the
-   tournament started, then predict every actual finals match pre-kickoff and
-   score it (log loss / RPS / Brier / accuracy / ECE). Optionally update the model
-   within the tournament as results come in. Fully backtestable from free martj42
-   data; no leakage (training strictly precedes each edition; venue neutrality is
-   taken from the data so host advantage is honoured).
+1. ``backtest_world_cups`` (match-level) -- proper scoring of every actual finals
+   match. For each edition, fit a model on all completed international matches
+   BEFORE the tournament started, then predict every match pre-kickoff and score
+   it (log loss / RPS / Brier / accuracy / ECE). Optionally update the model
+   within the tournament as results come in. No leakage (training strictly
+   precedes each edition; venue neutrality is taken from the data so host
+   advantage is honoured).
 
-2. ``backtest_champions`` (secondary, noisy) -- reconstruct each edition's groups
-   from its own fixtures and Monte-Carlo the tournament pre-start, recording the
-   champion probability the model assigned to the team that actually won. With
-   only a handful of editions this is illustrative, not decisive.
+2. ``backtest_tournament`` -- scores the SAME tournament-simulation pipeline the
+   live World Cup 2026 tab uses (reconstruct groups, fit pre-tournament,
+   Monte-Carlo the bracket) on every edition: per-edition champion rank/top-N,
+   and a STAGE-REACH CALIBRATION table (pooled predicted P(reach R16/QF/SF/final/
+   title) vs reality, as a Brier skill score over the base rate). This answers
+   "do the simulated probabilities translate into good predictions?".
+
+3. ``backtest_champions`` (thin/legacy) -- the champion-probability slice of (2),
+   kept for back-compat.
 
 NOTE ON THE MARKET: historical closing odds are not freely available, so the
 market baseline (the real bar) cannot be backtested on past World Cups here --
@@ -76,7 +82,7 @@ def backtest_world_cups(
     history: pd.DataFrame,
     model_factory: Callable[[], object],
     years: list[int] | None = None,
-    min_year: int = 2006,
+    min_year: int = 1998,
     update_within: bool = True,
 ) -> dict:
     """Match-level out-of-sample backtest over past World Cups.
@@ -141,7 +147,7 @@ def compare_models_on_world_cups(
     history: pd.DataFrame,
     factories: dict[str, Callable[[], object]],
     years: list[int] | None = None,
-    min_year: int = 2006,
+    min_year: int = 1998,
     update_within: bool = True,
 ) -> pd.DataFrame:
     """Run the match-level backtest for several model variants -> leaderboard.
@@ -209,11 +215,184 @@ WC_CHAMPIONS: dict[int, str] = {
 }
 
 
+def actual_stage_reach(
+    matches: pd.DataFrame, fmt, champion: str | None = None
+) -> dict[str, set[str]] | None:
+    """Which teams actually PLAYED IN each knockout stage of an edition.
+
+    Derived from participation (who took the pitch), NOT from who won, so
+    penalty-shootout results -- which the score alone cannot resolve -- never
+    matter. Knockout rounds are temporally separated, so date order assigns them
+    cleanly; the third-place playoff is skipped by taking the FINAL to be the
+    chronologically last match. Returns ``{stage: {teams}}`` for every stage in
+    ``fmt.stage_order`` plus ``"champion"`` (from the verified champions map), or
+    None if the bracket does not have the expected shape.
+    """
+    m = matches.sort_values("date", kind="mergesort").reset_index(drop=True)
+    n_group_games = fmt.n_groups * 6  # round-robin of four => six games per group
+    ko = m.iloc[n_group_games:].reset_index(drop=True)
+    n_ko_teams = fmt.n_groups * fmt.advance_per_group + fmt.n_best_third
+    sizes, t = [], n_ko_teams
+    while t >= 2:
+        sizes.append(t // 2)
+        t //= 2
+    stages = list(fmt.stage_order)
+    if len(sizes) != len(stages) or len(ko) < sum(sizes[:-1]) + 1:
+        return None
+
+    def teams_of(rows: pd.DataFrame) -> set[str]:
+        return set(rows["home_team"]) | set(rows["away_team"])
+
+    reach: dict[str, set[str]] = {}
+    idx = 0
+    for i, stage in enumerate(stages):
+        if i < len(stages) - 1:
+            rows = ko.iloc[idx:idx + sizes[i]]
+            idx += sizes[i]
+        else:
+            rows = ko.iloc[-1:]  # the final is the last match (3rd-place playoff skipped)
+        reach[stage] = teams_of(rows)
+    if champion is not None:
+        from ..data.aliases import normalize_team_name
+
+        reach["champion"] = {normalize_team_name(champion)}
+    return reach
+
+
+def backtest_tournament(
+    history: pd.DataFrame,
+    model_factory: Callable[[], object],
+    years: list[int] | None = None,
+    min_year: int = 1998,
+    n_simulations: int = 4000,
+    seed: int = 7,
+    champions: dict[int, str] | None = None,
+) -> dict:
+    """Score the FULL tournament-simulation methodology on past World Cups.
+
+    This is the same pipeline the live World Cup 2026 tab uses -- reconstruct the
+    groups, fit the model on pre-tournament data, Monte-Carlo the bracket -- run
+    on every completed edition (default back to 1998) and scored properly:
+
+      * per-edition champion probability / pre-tournament rank / top-N hit;
+      * STAGE-REACH CALIBRATION -- pool every team's predicted P(reach R16 / QF /
+        SF / final / title) against whether it actually did, across all editions,
+        and report a Brier skill score vs the base rate (this is the real test of
+        "do the simulated probabilities translate into good predictions?");
+      * champion log-loss vs a uniform prior.
+
+    Returns ``{editions, calibration, champion_skill}``. Historical odds are not
+    free, so there is no market anchor here -- this scores the pure model.
+    """
+    from ..simulation import rules
+    from ..simulation.tournament import simulate_tournament
+    from ..data.aliases import normalize_team_name
+
+    champions = champions or WC_CHAMPIONS
+    history = schemas.completed_matches(history)
+    history = history.sort_values("date", kind="mergesort").reset_index(drop=True)
+    fmt = rules.world_cup_legacy_format()
+    editions = _editions(history, years, min_year)
+    eds_matches = identify_world_cups(history)
+    stages = list(fmt.stage_order) + ["champion"]
+
+    per_edition: list[dict] = []
+    # Pooled (prediction, outcome) per stage across all editions, for calibration.
+    pool: dict[str, list[tuple[float, float]]] = {s: [] for s in stages}
+    champ_neglogp: list[float] = []
+    n_teams_seen: list[int] = []
+
+    for year in editions:
+        champ = champions.get(year)
+        if champ is None:
+            continue
+        champ = normalize_team_name(champ)
+        matches = eds_matches[year]
+        groups = _reconstruct_year_groups(matches, n_groups=fmt.n_groups)
+        if groups is None:
+            per_edition.append({"year": year, "note": "group reconstruction failed"})
+            continue
+        reach = actual_stage_reach(matches, fmt, champion=champ)
+        if reach is None:
+            per_edition.append({"year": year, "note": "bracket reconstruction failed"})
+            continue
+        start = matches["date"].min()
+        train = history[history["date"] < start]
+        if len(train) < 200:
+            continue
+        model = model_factory()
+        model.fit(train.copy())
+        sims = simulate_tournament(
+            model, groups, n_simulations=n_simulations, seed=seed, fmt=fmt
+        ).reset_index(drop=True)
+
+        ranked = sims.sort_values("champion_probability", ascending=False).reset_index(drop=True)
+        crow = ranked[ranked["team"] == champ]
+        c_prob = float(crow["champion_probability"].iloc[0]) if len(crow) else 0.0
+        c_rank = int(crow.index[0]) + 1 if len(crow) else -1
+        n_teams = len(sims)
+        n_teams_seen.append(n_teams)
+        champ_neglogp.append(-np.log(max(c_prob, 1e-9)))
+
+        # Accumulate calibration pairs for every team and stage.
+        for s in stages:
+            col = "champion_probability" if s == "champion" else f"{s}_probability"
+            if col not in sims.columns:
+                continue
+            reached = reach.get(s, set())
+            for _, srow in sims.iterrows():
+                pred = float(srow[col])
+                actual = 1.0 if srow["team"] in reached else 0.0
+                pool[s].append((pred, actual))
+
+        per_edition.append({
+            "year": year,
+            "actual_champion": champ,
+            "model_champion_prob": round(c_prob, 4),
+            "champion_pre_rank": c_rank,
+            "champ_in_top4": c_rank != -1 and c_rank <= 4,
+            "champ_in_top8": c_rank != -1 and c_rank <= 8,
+            "favourite": ranked.iloc[0]["team"] if len(ranked) else "",
+        })
+
+    # Stage-reach calibration table (Brier skill vs the base rate).
+    cal_rows = []
+    for s in stages:
+        pairs = pool[s]
+        if not pairs:
+            continue
+        preds = np.array([p for p, _ in pairs])
+        outs = np.array([o for _, o in pairs])
+        base = float(outs.mean())
+        brier_model = float(np.mean((preds - outs) ** 2))
+        brier_base = base * (1.0 - base)  # Brier of the best constant predictor
+        skill = 1.0 - brier_model / brier_base if brier_base > 0 else float("nan")
+        cal_rows.append({
+            "stage": s, "n": len(pairs), "base_rate": round(base, 3),
+            "mean_pred": round(float(preds.mean()), 3),
+            "brier_model": round(brier_model, 4), "brier_base": round(brier_base, 4),
+            "brier_skill": round(skill, 3),
+        })
+    calibration = pd.DataFrame(cal_rows)
+
+    n_teams = int(np.median(n_teams_seen)) if n_teams_seen else 0
+    champion_skill = {
+        "editions": len(champ_neglogp),
+        "mean_neglogp_model": round(float(np.mean(champ_neglogp)), 3) if champ_neglogp else float("nan"),
+        "mean_neglogp_uniform": round(float(np.log(n_teams)), 3) if n_teams else float("nan"),
+    }
+    return {
+        "editions": pd.DataFrame(per_edition),
+        "calibration": calibration,
+        "champion_skill": champion_skill,
+    }
+
+
 def backtest_champions(
     history: pd.DataFrame,
     model_factory: Callable[[], object],
     years: list[int] | None = None,
-    min_year: int = 2006,
+    min_year: int = 1998,
     n_simulations: int = 2000,
     seed: int = 7,
     champions: dict[int, str] | None = None,

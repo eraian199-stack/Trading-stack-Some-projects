@@ -532,13 +532,28 @@ def cmd_backtest_world_cups(args: argparse.Namespace) -> int:
     lb = wc_backtest.compare_models_on_world_cups(
         history, factories, min_year=args.min_year, update_within=not args.no_update
     )
-    if args.champions:
-        champ = wc_backtest.backtest_champions(
+    if args.tournament or args.champions:
+        print(
+            f"\nTournament-simulation backtest since {args.min_year} (the same "
+            f"pipeline as the live World Cup tab: reconstruct groups, fit "
+            f"pre-tournament, Monte-Carlo the bracket; {args.sims} sims).",
+            file=sys.stderr,
+        )
+        res = wc_backtest.backtest_tournament(
             history, EloGoalsModel, min_year=args.min_year, n_simulations=args.sims
         )
-        print("\nChampion backtest (model prob given to the actual winner):",
+        print("Per edition (champion the model would have predicted):", file=sys.stderr)
+        print(res["editions"].to_csv(index=False))
+        print("Stage-reach calibration (Brier skill vs base rate; >0 = real skill):",
               file=sys.stderr)
-        print(champ.to_csv(index=False))
+        print(res["calibration"].to_csv(index=False))
+        cs = res["champion_skill"]
+        print(
+            f"Champion log-loss: model {cs['mean_neglogp_model']} vs uniform "
+            f"{cs['mean_neglogp_uniform']} over {cs['editions']} editions "
+            f"(lower = better; below uniform = real skill).",
+            file=sys.stderr,
+        )
     if args.out:
         lb.to_csv(args.out)
         print(f"Wrote leaderboard to {args.out}", file=sys.stderr)
@@ -1014,7 +1029,8 @@ def build_parser() -> argparse.ArgumentParser:
     # --- backtest-world-cups -------------------------------------------------
     p_bw = sub.add_parser(
         "backtest-world-cups",
-        help="Out-of-sample match-level backtest of model variants on past WCs.",
+        help="Out-of-sample backtest of the model on past WCs (match-level + "
+             "full tournament simulation), default back to 1998.",
     )
     p_bw.add_argument(
         "--model",
@@ -1023,8 +1039,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Variant to backtest (default: all).",
     )
     p_bw.add_argument(
-        "--min-year", type=int, default=2006,
-        help="Earliest WC edition to include (default 2006; the 32-team regime).",
+        "--min-year", type=int, default=1998,
+        help="Earliest WC edition to include (default 1998; the 32-team regime).",
     )
     p_bw.add_argument(
         "--form-weight", type=float, default=250.0,
@@ -1035,10 +1051,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do NOT update ratings within each tournament (fit-once).",
     )
     p_bw.add_argument(
-        "--champions", action="store_true",
-        help="Also run the (noisy) champion-probability simulation backtest.",
+        "--tournament", action="store_true",
+        help="Also run the full tournament-simulation backtest (champion rank + "
+             "stage-reach calibration) -- the same pipeline as the live WC tab.",
     )
-    p_bw.add_argument("--sims", type=int, default=2000, help="Champion-backtest runs.")
+    p_bw.add_argument(
+        "--champions", action="store_true",
+        help="Alias for --tournament (back-compat).",
+    )
+    p_bw.add_argument("--sims", type=int, default=4000, help="Tournament-backtest runs.")
     p_bw.add_argument("--out", default=None, help="Write the leaderboard CSV here.")
     p_bw.set_defaults(func=cmd_backtest_world_cups)
 
@@ -1083,7 +1104,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="wc-model = EloGoals components; wc-hyperparams = Elo K/home-adv/shape; "
         "club-features = classifier feature groups on a club league.",
     )
-    p_ab.add_argument("--min-year", type=int, default=2006, help="Earliest WC edition.")
+    p_ab.add_argument("--min-year", type=int, default=1998, help="Earliest WC edition.")
     p_ab.add_argument("--no-update", action="store_true", help="Fit-once (no within-tournament update).")
     p_ab.add_argument("--league", default="E0", help="Club league code (club-features).")
     p_ab.add_argument("--seasons", default=None, help="Club season codes (club-features).")

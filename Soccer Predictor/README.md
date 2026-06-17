@@ -118,7 +118,8 @@ simulate-tournament    group + knockout Monte Carlo (custom CSV formats)
 world-cup              LIVE World Cup 2026 (real data + live results + market anchor)
 edges                  live model-vs-market value scan for upcoming fixtures
 fetch-ratings          build a team,strength squad-overlay CSV (Transfermarkt)
-backtest-world-cups    match- and tournament-level backtest on past World Cups
+backtest-world-cups    backtest on past World Cups (1998+): match-level + the
+                       full tournament simulation, with stage-reach calibration
 ml-report              market floor, overfit gap, beats-market bootstrap CI
 ablation               does each added variable actually help, out of sample?
 update-data            refresh cached sources
@@ -137,7 +138,19 @@ PYTHONPATH=src python -m soccer_predictor.cli predict-match \
 
 # Did the optional national-team variables earn their place?
 PYTHONPATH=src python -m soccer_predictor.cli ablation
+
+# Backtest the SAME live methodology on every World Cup back to 1998:
+# fit pre-tournament, Monte-Carlo the bracket, score champion rank + calibration
+PYTHONPATH=src python -m soccer_predictor.cli backtest-world-cups --tournament
 ```
+
+The tournament backtest reconstructs each past edition's groups, fits the model
+only on data that predates the tournament, and Monte-Carlos the bracket — exactly
+what the live tab does for 2026. Out of sample (1998–2022) the actual champion
+lands in the model's pre-tournament **top 8 in every edition** (top 4 in five of
+seven), and the simulated reach probabilities show **positive Brier skill over the
+base rate at every stage** (Round of 16 → title) — i.e. the probabilities carry
+real information, not just plausible-looking numbers.
 
 ## Streamlit app
 

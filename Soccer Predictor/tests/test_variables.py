@@ -161,6 +161,32 @@ def test_identify_and_backtest_world_cups():
     assert 0.0 < res["pooled"]["log_loss"] < 3.0
 
 
+def test_actual_stage_reach_from_bracket():
+    """Stage participation is derived from who PLAYED each round (penalty-proof),
+    the third-place playoff is skipped, and the final is the last match."""
+    fmt = sp.world_cup_legacy_format()
+    rows = []
+    # 48 group games (any teams) dated before the knockouts.
+    base = pd.Timestamp("2018-06-01")
+    for i in range(fmt.n_groups * 6):
+        rows.append({"date": base + pd.Timedelta(days=i // 8),
+                     "home_team": f"t{i % 32}", "away_team": f"t{(i + 1) % 32}"})
+    def ko(day, pairs):
+        for h, a in pairs:
+            rows.append({"date": pd.Timestamp(day), "home_team": h, "away_team": a})
+    ko("2018-06-20", [(f"t{2*i}", f"t{2*i+1}") for i in range(8)])      # R16: t0..t15
+    ko("2018-06-24", [("t0","t2"), ("t4","t6"), ("t8","t10"), ("t12","t14")])  # QF
+    ko("2018-06-28", [("t0","t4"), ("t8","t12")])                      # SF
+    ko("2018-06-30", [("t4","t12")])                                   # 3rd place (skipped)
+    ko("2018-07-01", [("t0","t8")])                                    # final
+    reach = sp.actual_stage_reach(pd.DataFrame(rows), fmt, champion="t0")
+    assert reach["round_of_16"] == {f"t{i}" for i in range(16)}
+    assert reach["quarterfinal"] == {"t0", "t2", "t4", "t6", "t8", "t10", "t12", "t14"}
+    assert reach["semifinal"] == {"t0", "t4", "t8", "t12"}
+    assert reach["final"] == {"t0", "t8"}          # the LAST match, not the 3rd-place one
+    assert reach["champion"] == {"t0"}
+
+
 def test_compare_models_on_world_cups_leaderboard():
     h = _history_with_wc(2018)
     lb = wc_backtest.compare_models_on_world_cups(
