@@ -30,7 +30,7 @@ import streamlit as st
 
 from ..data import loaders, odds_api, schemas, sources, synthetic, world_cup
 from ..data.aliases import normalize_team_name
-from ..evaluation import betting, metrics, reports, walk_forward
+from ..evaluation import betting, metrics, reports, walk_forward, wc_backtest
 from ..features.market import implied_probabilities
 from ..models import DixonColes, EloGoalsModel, PoissonXG, default_ensemble
 from ..models.base import ScorelineModel, predict_markets
@@ -378,8 +378,125 @@ def _tab_tournament(df: pd.DataFrame, cfg: dict) -> None:
         )
 
 
+WC_BACKTEST_EDITIONS = [
+    "All since 1998", "2026", "2022", "2018", "2014", "2010", "2006", "2002", "1998",
+]
+
+
+@st.cache_data(show_spinner="Backtesting past World Cups...", ttl=3600)
+def _wc_matchlevel_backtest(edition: str) -> dict:
+    """Match-level OOS backtest of the Elo engine on past World Cups (+ no-skill floor).
+
+    Every finals match is predicted pre-kickoff by a model fit only on prior
+    international results. The bar is the no-skill floor (always predict the H/D/A
+    base rate) -- the gap between the two is the model's real skill.
+    """
+    hist = _live_history()
+    years = None if edition == "All since 1998" else [int(edition)]
+    res = wc_backtest.backtest_world_cups(
+        hist, EloGoalsModel, years=years, min_year=1998, update_within=True
+    )
+    out = np.asarray(res["outcomes"], dtype=object)
+    floor: dict = {}
+    if len(out):
+        base = np.array([(out == k).mean() for k in ("H", "D", "A")])
+        floor = metrics.all_metrics(np.tile(base, (len(out), 1)), out)
+    per = pd.DataFrame(res["editions"]).T if res["editions"] else pd.DataFrame()
+    return {"pooled": res["pooled"], "floor": floor, "per_edition": per, "n": int(len(out))}
+
+
+@st.cache_data(show_spinner="Simulating past World Cups...", ttl=3600)
+def _wc_tournament_backtest(edition: str, n_sims: int) -> dict:
+    """Full tournament-simulation scorecard (champion rank + stage calibration)."""
+    hist = _live_history()
+    years = None if edition == "All since 1998" else [int(edition)]
+    return wc_backtest.backtest_tournament(
+        hist, EloGoalsModel, years=years, min_year=1998, n_simulations=n_sims
+    )
+
+
 def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
     st.subheader("Backtest Lab")
+
+    # --- World Cup backtest (international, 1998+) -- the high-power test ------
+    st.markdown("#### 🏆 World Cup backtest (international, 1998+)")
+    st.caption(
+        "The high-power test: every World Cup finals match since 1998 predicted "
+        "pre-kickoff by the Elo engine fit only on prior results (no leakage). The "
+        "bar is the no-skill floor (always predict the base rate) -- the gap is the "
+        "model's real skill. Historical odds aren't free, so the market isn't shown."
+    )
+    e1, e2, e3 = st.columns([1.2, 1.4, 1])
+    edition = e1.selectbox("Edition", WC_BACKTEST_EDITIONS, key="wc_bt_edition")
+    run_tourney = e2.checkbox(
+        "Also simulate the bracket (champion rank + calibration)",
+        value=False, key="wc_bt_tourney",
+        help="Monte-Carlo each completed tournament the way the live tab does — "
+        "slower. Scores how well the simulated advancement probabilities matched "
+        "reality.",
+    )
+    n_sims = int(e3.slider("Sim runs", 1000, 8000, 3000, step=1000, key="wc_bt_sims"))
+    if st.button("Run World Cup backtest", type="primary", key="wc_bt_run"):
+        try:
+            ml = _wc_matchlevel_backtest(edition)
+        except Exception as exc:
+            st.error(f"World Cup backtest failed: {exc}")
+        else:
+            if ml["n"] == 0:
+                st.warning("No finals matches for that selection yet.")
+            else:
+                p, floor = ml["pooled"], ml["floor"]
+                cols = st.columns(5)
+                cols[0].metric(
+                    "Log loss", f"{p['log_loss']:.4f}",
+                    f"{p['log_loss'] - floor['log_loss']:+.4f} vs floor",
+                    delta_color="inverse",
+                )
+                cols[1].metric("RPS", f"{p['rps']:.4f}")
+                cols[2].metric("Brier", f"{p['brier']:.4f}")
+                cols[3].metric("Accuracy", f"{p['accuracy']:.1%}")
+                cols[4].metric("ECE", f"{p['ece']:.4f}")
+                st.caption(
+                    f"No-skill floor — always predict the base rate: log loss "
+                    f"{floor['log_loss']:.4f} · RPS {floor['rps']:.4f} · Brier "
+                    f"{floor['brier']:.4f}. The model beats it by "
+                    f"{floor['log_loss'] - p['log_loss']:+.4f} log loss over "
+                    f"{ml['n']} matches — that gap is the skill."
+                )
+                if edition == "All since 1998" and not ml["per_edition"].empty:
+                    show = ml["per_edition"][
+                        ["n", "log_loss", "rps", "brier", "accuracy", "ece"]
+                    ].round(4)
+                    st.caption("Per edition")
+                    st.dataframe(show, use_container_width=True)
+                if run_tourney:
+                    res = _wc_tournament_backtest(edition, n_sims)
+                    eds = res.get("editions")
+                    if eds is None or len(eds) == 0:
+                        st.info(
+                            "No completed tournament to simulate for that selection "
+                            "(2026 is still in progress)."
+                        )
+                    else:
+                        st.caption("Tournament simulation — champion the model ranked")
+                        st.dataframe(eds, use_container_width=True, hide_index=True)
+                        st.caption(
+                            "Stage-reach calibration — Brier skill vs the base rate "
+                            "(>0 means the advancement probabilities carry real info)"
+                        )
+                        st.dataframe(res["calibration"], use_container_width=True,
+                                     hide_index=True)
+                        cs = res["champion_skill"]
+                        st.caption(
+                            f"Champion log loss: model {cs['mean_neglogp_model']} vs "
+                            f"uniform {cs['mean_neglogp_uniform']} over "
+                            f"{cs['editions']} editions (lower = better)."
+                        )
+
+    st.divider()
+
+    # --- Walk-forward on the loaded data (club / synthetic) ------------------
+    st.markdown("#### Walk-forward on the loaded data")
     st.caption(
         "Expanding-window walk-forward only -- random k-fold leaks the future "
         "and produces fantasy accuracy."
@@ -389,8 +506,8 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
     folds = int(c1.slider("Folds", 2, 10, 5))
     min_train = c2.slider("First training fraction", 0.3, 0.8, 0.5, step=0.05)
 
-    if not st.button("Run walk-forward backtest", type="primary"):
-        st.info("Press the button to run the time-aware backtest.")
+    if not st.button("Run walk-forward backtest", key="wf_run"):
+        st.info("Press the button to run the time-aware backtest on the loaded data.")
         return
 
     factory = MODEL_FACTORIES[cfg["model_label"]]

@@ -163,6 +163,11 @@ Five tabs: **🏆 World Cup 2026 (live)**, **Match Predictor**, **Tournament
 Simulator**, **Backtest Lab**, and **Betting Edge Scanner** (model fair odds vs
 market vs edge, with calibration warnings).
 
+The **Backtest Lab** tab has a World Cup backtest with an edition dropdown (every
+World Cup back to 1998, or all of them pooled): it shows the match-level metrics
+against the no-skill floor, and can optionally Monte-Carlo each completed bracket
+for the champion-rank + stage-reach calibration scorecard.
+
 ## How the live data flows
 
 ```
