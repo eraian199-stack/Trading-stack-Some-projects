@@ -415,6 +415,70 @@ def _wc_tournament_backtest(edition: str, n_sims: int) -> dict:
     )
 
 
+@st.cache_data(show_spinner="Simulating that World Cup...", ttl=3600)
+def _wc_past_simulation(year: int, n_sims: int) -> dict | None:
+    """Groups + full per-team win/advancement probabilities for one past edition."""
+    return wc_backtest.simulate_past_world_cup(
+        _live_history(), EloGoalsModel, year, n_simulations=n_sims
+    )
+
+
+_FINISH_ORDER = [
+    ("champion", "🏆 Champion"), ("final", "Final"), ("semifinal", "Semifinal"),
+    ("quarterfinal", "Quarterfinal"), ("round_of_16", "Round of 16"),
+]
+
+
+def _actual_finish(team: str, reached: dict | None) -> str:
+    """Deepest stage a team actually reached that edition (for the results column)."""
+    if not reached:
+        return ""
+    for key, label in _FINISH_ORDER:
+        if team in reached.get(key, set()):
+            return label
+    return "Group stage"
+
+
+def _render_past_wc_simulation(year: int, n_sims: int) -> None:
+    """Groups + pre-tournament win/advancement probabilities for one past edition,
+    shown next to what actually happened (the live tab's view, run on history)."""
+    res = _wc_past_simulation(year, n_sims)
+    if res is None:
+        st.info("Couldn't reconstruct that edition's groups from the fixtures.")
+        return
+    groups, sims, reached = res["groups"], res["sims"], res["reached"]
+    if res["champion"]:
+        fav = sims.iloc[0]
+        st.success(
+            f"Actual champion: **{res['champion']}** — the model ranked them "
+            f"#{res['champion_rank']} of {len(sims)} pre-tournament. Its favourite "
+            f"was {fav['team']} ({fav['champion_probability']:.1%})."
+        )
+    st.markdown(f"**Groups — {year}** (reconstructed from the fixtures; labels arbitrary)")
+    gdf = pd.DataFrame(
+        [{"Group": g, "Teams": ", ".join(t)} for g, t in groups.items()]
+    )
+    st.dataframe(gdf, use_container_width=True, hide_index=True)
+
+    disp = sims.copy()
+    disp.insert(2, "actual_finish", [_actual_finish(t, reached) for t in disp["team"]])
+    st.markdown(
+        f"**Pre-tournament win probability — {year}** (model fit only on data "
+        "before the tournament; `actual_finish` = how far the team really got)"
+    )
+    fig = px.bar(
+        disp.head(16), x="champion_probability", y="team", color="group",
+        orientation="h", text="champion_probability",
+    ).update_layout(yaxis={"categoryorder": "total ascending"},
+                    title=f"Champion probability — {year} (top 16)")
+    st.plotly_chart(fig, use_container_width=True)
+    st.dataframe(disp, use_container_width=True, hide_index=True)
+    st.download_button(
+        "Download probabilities (CSV)", disp.to_csv(index=False),
+        file_name=f"world_cup_{year}_backtest.csv", mime="text/csv", key="wc_bt_dl",
+    )
+
+
 def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
     st.subheader("Backtest Lab")
 
@@ -463,35 +527,42 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
                     f"{floor['log_loss'] - p['log_loss']:+.4f} log loss over "
                     f"{ml['n']} matches — that gap is the skill."
                 )
-                if edition == "All since 1998" and not ml["per_edition"].empty:
-                    show = ml["per_edition"][
-                        ["n", "log_loss", "rps", "brier", "accuracy", "ece"]
-                    ].round(4)
-                    st.caption("Per edition")
-                    st.dataframe(show, use_container_width=True)
-                if run_tourney:
-                    res = _wc_tournament_backtest(edition, n_sims)
-                    eds = res.get("editions")
-                    if eds is None or len(eds) == 0:
-                        st.info(
-                            "No completed tournament to simulate for that selection "
-                            "(2026 is still in progress)."
+                if edition == "All since 1998":
+                    if not ml["per_edition"].empty:
+                        st.caption("Per edition")
+                        st.dataframe(
+                            ml["per_edition"][
+                                ["n", "log_loss", "rps", "brier", "accuracy", "ece"]
+                            ].round(4),
+                            use_container_width=True,
                         )
-                    else:
-                        st.caption("Tournament simulation — champion the model ranked")
-                        st.dataframe(eds, use_container_width=True, hide_index=True)
-                        st.caption(
-                            "Stage-reach calibration — Brier skill vs the base rate "
-                            "(>0 means the advancement probabilities carry real info)"
-                        )
-                        st.dataframe(res["calibration"], use_container_width=True,
-                                     hide_index=True)
-                        cs = res["champion_skill"]
-                        st.caption(
-                            f"Champion log loss: model {cs['mean_neglogp_model']} vs "
-                            f"uniform {cs['mean_neglogp_uniform']} over "
-                            f"{cs['editions']} editions (lower = better)."
-                        )
+                    if run_tourney:
+                        res = _wc_tournament_backtest(edition, n_sims)
+                        eds = res.get("editions")
+                        if eds is None or len(eds) == 0:
+                            st.info("No completed tournament to simulate for that selection.")
+                        else:
+                            st.caption("Tournament simulation — champion the model ranked")
+                            st.dataframe(eds, use_container_width=True, hide_index=True)
+                            st.caption(
+                                "Stage-reach calibration — Brier skill vs the base rate "
+                                "(>0 means the advancement probabilities carry real info)"
+                            )
+                            st.dataframe(res["calibration"], use_container_width=True,
+                                         hide_index=True)
+                            cs = res["champion_skill"]
+                            st.caption(
+                                f"Champion log loss: model {cs['mean_neglogp_model']} vs "
+                                f"uniform {cs['mean_neglogp_uniform']} over "
+                                f"{cs['editions']} editions (lower = better)."
+                            )
+                elif edition == "2026":
+                    st.info(
+                        "2026 is in progress — open the **🏆 World Cup 2026 (live)** "
+                        "tab for its groups and live, updating win probabilities."
+                    )
+                else:
+                    _render_past_wc_simulation(int(edition), n_sims)
 
     st.divider()
 

@@ -259,6 +259,62 @@ def actual_stage_reach(
     return reach
 
 
+def simulate_past_world_cup(
+    history: pd.DataFrame,
+    model_factory: Callable[[], object],
+    year: int,
+    n_simulations: int = 4000,
+    seed: int = 7,
+    champions: dict[int, str] | None = None,
+) -> dict | None:
+    """Pre-tournament simulation of ONE past edition -- the live pipeline on history.
+
+    Reconstructs the edition's groups, fits the model on data strictly before the
+    tournament, and Monte-Carlos the 32-team legacy bracket -- exactly what the
+    live World Cup 2026 tab does, but for a finished edition so the prediction can
+    be put next to what actually happened. Returns
+    ``{year, groups, sims, champion, champion_rank, reached}`` (``sims`` is the
+    full per-team probability table) or None if the edition can't be reconstructed.
+    """
+    from ..simulation import rules
+    from ..simulation.tournament import simulate_tournament
+    from ..data.aliases import normalize_team_name
+
+    champions = champions or WC_CHAMPIONS
+    history = schemas.completed_matches(history)
+    history = history.sort_values("date", kind="mergesort").reset_index(drop=True)
+    fmt = rules.world_cup_legacy_format()
+    eds = identify_world_cups(history)
+    if year not in eds:
+        return None
+    matches = eds[year]
+    groups = _reconstruct_year_groups(matches, n_groups=fmt.n_groups)
+    if groups is None:
+        return None
+    start = matches["date"].min()
+    train = history[history["date"] < start]
+    if len(train) < 200:
+        return None
+    model = model_factory()
+    model.fit(train.copy())
+    sims = simulate_tournament(
+        model, groups, n_simulations=n_simulations, seed=seed, fmt=fmt
+    ).reset_index(drop=True)
+
+    champ = champions.get(year)
+    champ = normalize_team_name(champ) if champ else None
+    reached = actual_stage_reach(matches, fmt, champion=champ) if champ else None
+    rank = -1
+    if champ:
+        ranked = sims.sort_values("champion_probability", ascending=False).reset_index(drop=True)
+        loc = ranked.index[ranked["team"] == champ]
+        rank = int(loc[0]) + 1 if len(loc) else -1
+    return {
+        "year": year, "groups": groups, "sims": sims,
+        "champion": champ, "champion_rank": rank, "reached": reached,
+    }
+
+
 def backtest_tournament(
     history: pd.DataFrame,
     model_factory: Callable[[], object],

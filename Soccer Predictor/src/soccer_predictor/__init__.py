@@ -86,6 +86,7 @@ from .evaluation.wc_backtest import (
     compare_models_on_world_cups,
     backtest_champions,
     backtest_tournament,
+    simulate_past_world_cup,
     actual_stage_reach,
     identify_world_cups,
 )
@@ -145,7 +146,7 @@ __all__ = [
     "betting_backtest", "closing_line_value", "max_drawdown",
     "leaderboard", "format_metrics", "calibration_table",
     "backtest_world_cups", "compare_models_on_world_cups", "backtest_champions",
-    "backtest_tournament", "actual_stage_reach",
+    "backtest_tournament", "simulate_past_world_cup", "actual_stage_reach",
     "identify_world_cups",
     "ml_comparison", "beats_market", "overfit_gap", "no_skill_log_loss",
     "ablation_table", "wc_ablation", "walk_forward_ablation",

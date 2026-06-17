@@ -165,7 +165,10 @@ market vs edge, with calibration warnings).
 
 The **Backtest Lab** tab has a World Cup backtest with an edition dropdown (every
 World Cup back to 1998, or all of them pooled): it shows the match-level metrics
-against the no-skill floor, and can optionally Monte-Carlo each completed bracket
+against the no-skill floor. Pick a single past edition and it also shows that
+tournament's reconstructed groups and the model's pre-tournament win / advancement
+probability for every team — the same view as the live 2026 tab — next to how far
+each team actually got. "All since 1998" can additionally Monte-Carlo every bracket
 for the champion-rank + stage-reach calibration scorecard.
 
 ## How the live data flows
