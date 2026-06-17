@@ -19,6 +19,9 @@ venv/
 # Generated / downloaded (regenerable, can be large; not part of the stack)
 data/cache/
 outputs/
+# Live results ledger: accumulates on disk as games are played (per-deployment
+# state, rebuilt from the feeds on a fresh checkout). Not a committed artifact.
+data/world_cup_2026_results.csv
 
 # Original uploaded reference framework (inputs that were merged into the stack)
 docs/files/

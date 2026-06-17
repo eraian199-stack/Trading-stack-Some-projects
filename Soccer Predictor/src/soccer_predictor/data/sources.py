@@ -193,9 +193,21 @@ def cached_get(url: str, cache_dir: str = DEFAULT_CACHE_DIR, ttl_days: float = 7
 # --------------------------------------------------------------------------- #
 # Fetchers (all build on cached_get + a loader; all degrade gracefully)
 # --------------------------------------------------------------------------- #
-def fetch_international_results(cache: bool = True) -> pd.DataFrame:
-    """Download + parse martj42 international results into a canonical frame."""
-    ttl = 7.0 if cache else 0.0
+def fetch_international_results(
+    cache: bool = True, ttl_days: float | None = None
+) -> pd.DataFrame:
+    """Download + parse martj42 international results into a canonical frame.
+
+    ``ttl_days`` overrides the cache freshness window: the 7-day default is fine
+    off-season, but during a live tournament callers pass a few hours so newly
+    played games are picked up promptly (``cache=False`` forces a re-download).
+    """
+    if not cache:
+        ttl = 0.0
+    elif ttl_days is not None:
+        ttl = max(0.0, float(ttl_days))
+    else:
+        ttl = 7.0
     path = cached_get(INTERNATIONAL_RESULTS_URL, ttl_days=ttl)
     return load_international_results(path)
 

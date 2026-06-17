@@ -540,9 +540,11 @@ def _tab_betting(df: pd.DataFrame, cfg: dict) -> None:
 # --------------------------------------------------------------------------- #
 # Live data (cached) -- World Cup 2026 + The Odds API
 # --------------------------------------------------------------------------- #
-@st.cache_data(show_spinner="Fetching real international results...", ttl=3600)
+@st.cache_data(show_spinner="Fetching real international results...", ttl=900)
 def _live_history() -> pd.DataFrame:
-    return sources.fetch_international_results()
+    # Tournament-fresh TTL so newly-played games are picked up within hours, not
+    # the 7-day off-season default.
+    return sources.fetch_international_results(ttl_days=world_cup._WC_HISTORY_TTL_DAYS)
 
 
 @st.cache_data(show_spinner="Fetching live results...", ttl=900)
@@ -554,24 +556,59 @@ def _live_scores() -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data(show_spinner="Saving results...", ttl=900)
+def _live_results_store() -> pd.DataFrame:
+    """Fold today's group games (martj42 + Odds-API) into the durable ledger.
+
+    Persisting here means a game stays locked in on every later run even after it
+    rolls out of the Odds-API window or the martj42 cache, so the live tab never
+    "loses" a result it has already shown. Scoped to the 72 group pairings.
+    """
+    return world_cup.update_results_store(
+        _live_history(), _live_scores(), valid_pairs=world_cup.group_pair_keys()
+    )
+
+
+def _live_results_fingerprint() -> str:
+    """A content hash of every group result played so far (pair -> score).
+
+    Used as the model/sim cache key INSTEAD of a row count: a score correction or
+    a net-zero feed transition (one game absorbed by martj42 as another rolls out
+    of the Odds-API window) leaves the count unchanged but the content different,
+    which would otherwise serve a stale model and simulation.
+    """
+    import hashlib
+
+    played = _live_results_store()  # persisted + group-scoped ledger
+    parts = sorted(
+        f"{world_cup._pair_key(h, a)}={int(hs)}-{int(as_)}"
+        for h, a, hs, as_ in zip(
+            played["home_team"], played["away_team"],
+            played["home_score"], played["away_score"],
+        )
+    )
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+
+
 @st.cache_data(show_spinner="Assembling live training data...", ttl=900)
 def _live_train() -> pd.DataFrame:
-    """Completed history + live Odds-API results (so the model sees today's games)."""
+    """Completed history + every WC game played so far (so the model sees them)."""
+    _live_results_store()  # persist before the trainer reads the ledger
     return world_cup.live_training_frame(use_odds_api_scores=True)
 
 
 @st.cache_resource(show_spinner="Fitting model on real history...")
-def _live_model(model_label: str, n_train: int) -> object:
-    del n_train  # cache key only; a new live result grows the frame -> refit
+def _live_model(model_label: str, fingerprint: str) -> object:
+    del fingerprint  # cache key only; new/changed results -> new key -> refit
     factory = MODEL_FACTORIES[model_label]
     return factory().fit(_live_train().copy())
 
 
 @st.cache_data(show_spinner="Simulating World Cup 2026...", ttl=900)
-def _live_wc(model_label: str, n_sims: int, anchor: bool, n_train: int) -> pd.DataFrame:
-    model = _live_model(model_label, n_train)
+def _live_wc(model_label: str, n_sims: int, anchor: bool, fingerprint: str) -> pd.DataFrame:
+    model = _live_model(model_label, fingerprint)
     groups = world_cup.load_groups()
-    # Lock in games already played (history + live Odds-API results).
+    # Lock in games already played (history + live Odds-API results + ledger).
     world_cup.build_fixtures(_live_history(), groups, extra_results=_live_scores())
     fixtures = loaders.load_fixtures(str(world_cup.FIXTURES_CSV))
     if anchor:
@@ -596,9 +633,10 @@ def _live_odds(sport: str, aggregate: str) -> pd.DataFrame:
 def _tab_world_cup() -> None:
     st.subheader("World Cup 2026 — live")
     st.caption(
-        "Real groups (verified vs the actual fixtures); games already played are "
-        "locked in (martj42 history + live Odds-API results, since martj42 lags); "
-        "the rest is Monte-Carlo'd from the model fit on real history through today."
+        "Real groups (verified vs the actual fixtures); every game played so far is "
+        "locked in from three sources — martj42 history, the live Odds-API feed, and "
+        "a saved results ledger so nothing is lost once seen; the rest is "
+        "Monte-Carlo'd from the model fit on real history through today."
     )
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
     model_label = c1.selectbox("Model", list(MODEL_FACTORIES), key="wc_model")
@@ -610,8 +648,15 @@ def _tab_world_cup() -> None:
     )
     go = c4.button("Run", type="primary")
     if c4.button("🔄 Refresh live data"):
-        # Drop the cached results/odds/sim so a just-finished game flows in.
-        for fn in (_live_scores, _live_train, _live_wc, _live_odds):
+        # Force a fresh martj42 download (bypass the disk cache) so a just-played
+        # game shows even if the cached feed predates it, then drop every cached
+        # live artifact so the new result flows all the way through.
+        try:
+            sources.fetch_international_results(cache=False)
+        except Exception:
+            pass
+        for fn in (_live_history, _live_scores, _live_results_store,
+                   _live_train, _live_model, _live_wc, _live_odds):
             try:
                 fn.clear()
             except Exception:
@@ -623,13 +668,13 @@ def _tab_world_cup() -> None:
                 "Use 🔄 Refresh after a match finishes.")
         return
     try:
-        n_train = len(_live_train())
+        fingerprint = _live_results_fingerprint()  # content key: refit on any change
         played = int(
             world_cup.build_fixtures(
                 _live_history(), world_cup.load_groups(), extra_results=_live_scores()
             ).pipe(lambda d: (d["home_score"] != "").sum())
         )
-        sims = _live_wc(model_label, n_sims, anchor, n_train)
+        sims = _live_wc(model_label, n_sims, anchor, fingerprint)
     except Exception as exc:
         st.error(f"Live World Cup pipeline failed: {exc}")
         return

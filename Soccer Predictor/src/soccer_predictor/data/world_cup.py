@@ -26,6 +26,7 @@ import io
 import re
 import urllib.request
 from collections import defaultdict
+from itertools import combinations
 from pathlib import Path
 
 import pandas as pd
@@ -37,8 +38,29 @@ from .sources import _ssl_context, fetch_international_results
 WC2026_COMPETITION = "FIFA World Cup"
 GROUPS_CSV = Path("data/world_cup_2026_groups.csv")
 FIXTURES_CSV = Path("data/world_cup_2026_fixtures.csv")
+# Durable ledger of every completed WC2026 group game ever observed, from ANY
+# feed. The point is monotonicity: martj42 lags (and is cached up to 7 days) and
+# the Odds-API /scores window only spans the last ~3 days, so on any single run a
+# played game can be absent from BOTH live feeds. Once a result lands here it is
+# never lost, so the live tab keeps every game it has ever seen locked in.
+RESULTS_CSV = Path("data/world_cup_2026_results.csv")
+# During a live tournament, refetch the martj42 feed if the cached copy is older
+# than this so newly-played games appear promptly (the 7-day default is too slow
+# while games are happening daily). The Odds-API feed + ledger cover anything
+# still missing in between.
+_WC_HISTORY_TTL_DAYS = 0.25  # ~6 hours
 GROUP_LETTERS = list("ABCDEFGHIJKL")
 _WIKI_GROUP_URL = "https://en.wikipedia.org/wiki/2026_FIFA_World_Cup_Group_{}"
+
+
+def _pair_key(home: object, away: object) -> tuple[str, str]:
+    """Order-insensitive key for a group pairing (each pair meets exactly once).
+
+    World Cup group games are at neutral venues, so different feeds disagree on
+    which side is "home". Keying on the sorted pair lets a result match its
+    fixture regardless of orientation (the score still travels with its team).
+    """
+    return tuple(sorted((str(home), str(away))))
 
 
 # --------------------------------------------------------------------------- #
@@ -51,6 +73,213 @@ def wc2026_matches(history: pd.DataFrame) -> pd.DataFrame:
     )
     wc = history[mask].sort_values("date", kind="mergesort")
     return wc.head(72).reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
+# Durable results ledger (so every played game stays locked in)
+# --------------------------------------------------------------------------- #
+def _empty_results() -> pd.DataFrame:
+    return schemas.validate_matches(
+        pd.DataFrame(
+            columns=[
+                "date", "home_team", "away_team", "home_score", "away_score",
+                "competition", "competition_type", "neutral_site",
+            ]
+        ),
+        require_scores=True,
+    )
+
+
+def group_pair_keys(groups: dict[str, list[str]] | None = None) -> set[tuple[str, str]]:
+    """The order-insensitive keys of the 72 group-stage pairings.
+
+    Each group is a round-robin of 4 teams (6 pairings), so this is the exact set
+    of pairs that may appear as group games. Used to SCOPE the results ledger to
+    the group stage: a knockout-round rematch of a group pair would otherwise
+    collide on the pair key and overwrite the group result, and a stray non-group
+    game would persist forever. ``groups`` defaults to the authoritative draw.
+    """
+    groups = groups or load_groups()
+    keys: set[tuple[str, str]] = set()
+    for teams in groups.values():
+        for a, b in combinations(teams, 2):
+            keys.add(_pair_key(a, b))
+    return keys
+
+
+def _wc_scored_pair_keys(frame: pd.DataFrame | None) -> set[tuple[str, str]]:
+    """Order-insensitive keys of the completed WC2026 games already in `frame`."""
+    if frame is None or not len(frame) or "competition" not in frame.columns:
+        return set()
+    date = pd.to_datetime(frame["date"], errors="coerce")
+    mask = (
+        (date >= "2026-06-01")
+        & frame["competition"].astype("string").str.fullmatch(
+            WC2026_COMPETITION, case=False, na=False
+        )
+        & frame["home_score"].notna()
+        & frame["away_score"].notna()
+    )
+    sub = frame[mask]
+    return {_pair_key(h, a) for h, a in zip(sub["home_team"], sub["away_team"])}
+
+
+def stored_results(store: Path = RESULTS_CSV) -> pd.DataFrame:
+    """Read the durable results ledger (canonical completed-match schema).
+
+    Degrades gracefully for READ paths: a missing or unreadable file yields an
+    empty frame rather than raising. (The WRITE path, update_results_store,
+    separately refuses to clobber a file it cannot parse -- see _ledger_corrupt.)
+    """
+    if not Path(store).exists():
+        return _empty_results()
+    try:
+        raw = pd.read_csv(store)
+    except (OSError, ValueError, pd.errors.ParserError):
+        return _empty_results()
+    if raw.empty:
+        return _empty_results()
+    try:
+        return schemas.validate_matches(raw, require_scores=True)
+    except schemas.SchemaError:
+        return _empty_results()
+
+
+def _ledger_corrupt(store: Path) -> bool:
+    """True if the ledger file exists with content we cannot parse.
+
+    A genuinely empty (header-only) ledger is NOT corrupt; only an unreadable or
+    schema-invalid file is. Used to avoid overwriting recoverable bytes.
+    """
+    store = Path(store)
+    if not store.exists() or store.stat().st_size == 0:
+        return False
+    try:
+        raw = pd.read_csv(store)
+    except (OSError, ValueError, pd.errors.ParserError):
+        return True
+    if raw.empty:
+        return False
+    try:
+        schemas.validate_matches(raw, require_scores=True)
+    except schemas.SchemaError:
+        return True
+    return False
+
+
+def completed_wc_results(
+    history: pd.DataFrame | None = None,
+    extra_results: pd.DataFrame | None = None,
+    *,
+    use_store: bool = True,
+    store: Path = RESULTS_CSV,
+    valid_pairs: set[tuple[str, str]] | None = None,
+    group_end: object = None,
+) -> pd.DataFrame:
+    """Every completed WC2026 group game seen so far, unioned across all feeds.
+
+    Combines (a) the durable on-disk ledger at ``store``, (b) the scored WC games
+    in the martj42 ``history`` (if given), and (c) live ``extra_results`` (e.g.
+    the Odds-API ``/scores`` frame), de-duplicated on the order-insensitive
+    pairing so the same game in two feeds (possibly with home/away swapped)
+    collapses to one row.
+
+    Precedence on a tie is martj42 history > live extra > ledger, i.e. the
+    official feed wins over a possibly-provisional live score, which wins over a
+    stale stored one.
+
+    Two guards keep this to the GROUP stage so a knockout-round result cannot
+    corrupt a group result that shares the same team pair:
+      * ``valid_pairs`` (e.g. ``group_pair_keys()``) drops any pairing that is not
+        one of the 72 group fixtures (knockouts between different-group teams);
+      * ``group_end`` (a date) drops anything played after the group stage, which
+        is the only thing that separates a final/SF rematch of two SAME-group
+        teams from their group game. When ``history`` is given it is derived
+        automatically from the 72 fixtures' last date.
+    """
+    if group_end is None and history is not None and len(history):
+        gs_all = wc2026_matches(history)
+        if len(gs_all):
+            group_end = pd.to_datetime(gs_all["date"], errors="coerce").max()
+    # Order so the most authoritative source is LAST (drop_duplicates keep="last").
+    frames: list[pd.DataFrame] = []
+    if use_store:
+        frames.append(stored_results(store))
+    if extra_results is not None and len(extra_results):
+        frames.append(schemas.validate_matches(extra_results, require_scores=True))
+    if history is not None and len(history):
+        wc = wc2026_matches(history)
+        scored = wc[wc["home_score"].notna() & wc["away_score"].notna()]
+        if len(scored):
+            frames.append(schemas.validate_matches(scored, require_scores=True))
+    frames = [f for f in frames if len(f)]
+    if not frames:
+        return _empty_results()
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined[
+        combined["home_score"].notna() & combined["away_score"].notna()
+    ]
+    if combined.empty:
+        return _empty_results()
+    if group_end is not None:
+        end = pd.to_datetime(group_end, errors="coerce")
+        if pd.notna(end):
+            d = pd.to_datetime(combined["date"], errors="coerce").dt.normalize()
+            combined = combined[d <= end.normalize()]
+    combined["_pk"] = [
+        _pair_key(h, a) for h, a in zip(combined["home_team"], combined["away_team"])
+    ]
+    if valid_pairs is not None:
+        combined = combined[combined["_pk"].isin(valid_pairs)]
+    if combined.empty:
+        return _empty_results()
+    combined = combined.drop_duplicates("_pk", keep="last").drop(columns="_pk")
+    return combined.sort_values("date", kind="mergesort").reset_index(drop=True)
+
+
+def update_results_store(
+    history: pd.DataFrame | None = None,
+    extra_results: pd.DataFrame | None = None,
+    *,
+    store: Path = RESULTS_CSV,
+    valid_pairs: set[tuple[str, str]] | None = None,
+    group_end: object = None,
+) -> pd.DataFrame:
+    """Fold newly-observed completed games into the durable ledger and persist it.
+
+    Idempotent and monotonic: the ledger only ever grows (or refreshes a score),
+    never loses a game, because the existing ledger is one of the unioned sources.
+    Two safeguards protect that invariant against I/O faults:
+      * if the existing file is present but UNPARSEABLE, it is quarantined to
+        ``<store>.corrupt`` (not silently overwritten with the parseable subset),
+        so its bytes can be recovered by hand;
+      * the new ledger is written atomically (temp file + rename) so a crash or
+        full disk mid-write can never truncate the live ledger.
+    Returns the full up-to-date ledger.
+    """
+    store = Path(store)
+    merged = completed_wc_results(
+        history, extra_results, use_store=True, store=store,
+        valid_pairs=valid_pairs, group_end=group_end,
+    )
+    if _ledger_corrupt(store):
+        bak = store.with_suffix(store.suffix + ".corrupt")
+        try:
+            store.replace(bak)
+            print(f"[world_cup] results ledger {store} was unreadable; quarantined "
+                  f"to {bak} (its parseable games, if any, are preserved below).")
+        except OSError:
+            print(f"[world_cup] results ledger {store} unreadable and could not be "
+                  f"quarantined; leaving it untouched rather than overwriting.")
+            return merged  # never clobber data we could not back up
+    try:
+        store.parent.mkdir(parents=True, exist_ok=True)
+        tmp = store.with_suffix(store.suffix + ".tmp")
+        merged.to_csv(tmp, index=False)
+        tmp.replace(store)  # atomic on POSIX -> readers never see a partial file
+    except OSError as exc:  # persistence is best-effort; never crash the sim
+        print(f"[world_cup] could not write results ledger {store} ({exc}).")
+    return merged
 
 
 def reconstruct_groups(history: pd.DataFrame) -> list[frozenset[str]]:
@@ -175,36 +404,51 @@ def build_fixtures(
     groups: dict[str, list[str]] | None = None,
     extra_results: pd.DataFrame | None = None,
     out: Path | None = FIXTURES_CSV,
+    *,
+    use_store: bool = True,
+    store: Path = RESULTS_CSV,
 ) -> pd.DataFrame:
     """Canonical fixtures frame for the 72 group games, scores filled where played.
 
-    ``extra_results`` (e.g. from odds_api.fetch_scores) tops up results that the
-    history feed has not yet absorbed, matched on (home, away).
+    Scores come from three sources, in this priority per fixture: the history
+    feed's own score, then live ``extra_results`` (e.g. odds_api.fetch_scores),
+    then the durable on-disk ledger at ``store`` (``use_store``). Matching is
+    ORDER-INSENSITIVE: World Cup games are at neutral venues, so a feed may list
+    the sides swapped relative to the fixture -- we match on the sorted pair and
+    orient each score back to the fixture's own home/away, so a result is never
+    silently dropped over a home/away disagreement.
     """
     groups = groups or load_groups()
     team_to_group = {t: g for g, teams in groups.items() for t in teams}
     gs = wc2026_matches(history)
 
-    extra_map: dict[tuple[str, str], tuple[int, int]] = {}
+    # Order-insensitive result map: pair-key -> {team: score}. Build it from the
+    # weakest source first so stronger ones overwrite (ledger < live extra).
+    extra_map: dict[tuple[str, str], dict[str, int]] = {}
+    sources_in_order = []
+    if use_store:
+        sources_in_order.append(stored_results(store))
     if extra_results is not None and len(extra_results):
-        for r in extra_results.itertuples(index=False):
-            if pd.notna(getattr(r, "home_score", None)) and pd.notna(
-                getattr(r, "away_score", None)
-            ):
-                extra_map[(r.home_team, r.away_team)] = (
-                    int(r.home_score),
-                    int(r.away_score),
-                )
+        sources_in_order.append(extra_results)
+    for frame in sources_in_order:
+        for r in frame.itertuples(index=False):
+            hs, as_ = getattr(r, "home_score", None), getattr(r, "away_score", None)
+            if pd.notna(hs) and pd.notna(as_):
+                extra_map[_pair_key(r.home_team, r.away_team)] = {
+                    r.home_team: int(hs),
+                    r.away_team: int(as_),
+                }
 
-    fixture_pairs = {(r.home_team, r.away_team) for r in gs.itertuples(index=False)}
+    fixture_keys = {_pair_key(r.home_team, r.away_team) for r in gs.itertuples(index=False)}
     rows = []
-    used_extra: set[tuple[str, str]] = set()
     for i, r in enumerate(gs.itertuples(index=False), start=1):
         group = team_to_group.get(r.home_team) or team_to_group.get(r.away_team) or ""
         hs, as_ = r.home_score, r.away_score
-        if (pd.isna(hs) or pd.isna(as_)) and (r.home_team, r.away_team) in extra_map:
-            hs, as_ = extra_map[(r.home_team, r.away_team)]
-            used_extra.add((r.home_team, r.away_team))
+        pk = _pair_key(r.home_team, r.away_team)
+        if (pd.isna(hs) or pd.isna(as_)) and pk in extra_map:
+            scored = extra_map[pk]
+            if r.home_team in scored and r.away_team in scored:
+                hs, as_ = scored[r.home_team], scored[r.away_team]
         rows.append(
             {
                 "match_id": i,
@@ -217,11 +461,10 @@ def build_fixtures(
                 "away_score": "" if pd.isna(as_) else int(as_),
             }
         )
-    # Surface live results whose (home, away) pair matches NO group fixture at all
-    # (a genuine team-name mismatch). Results that matched a fixture which already
-    # had a score from the history feed are NOT flagged -- they were simply not
-    # needed, not dropped.
-    dropped = sorted(k for k in extra_map if k not in fixture_pairs)
+    # Surface live results whose pairing matches NO group fixture at all (a genuine
+    # team-name mismatch needing an alias). A result that matched a fixture which
+    # already had a history score is NOT flagged -- it was redundant, not dropped.
+    dropped = sorted(k for k in extra_map if k not in fixture_keys)
     if dropped:
         import sys
 
@@ -241,35 +484,53 @@ def build_fixtures(
 # --------------------------------------------------------------------------- #
 # One-call live simulation
 # --------------------------------------------------------------------------- #
-def live_training_frame(use_odds_api_scores: bool = True) -> pd.DataFrame:
-    """Completed international history, topped up with live Odds-API scores.
+def live_training_frame(
+    use_odds_api_scores: bool = True, *, use_store: bool = True, store: Path = RESULTS_CSV
+) -> pd.DataFrame:
+    """Completed international history, topped up with every WC game played so far.
 
-    The martj42 feed lags (and is cached), so a game played today often is not in
-    it yet; the Odds API ``/scores`` endpoint has it within the hour. Merging the
-    two means both the locked-in fixtures AND the fitted model reflect results as
-    they happen. Live scores override history on the same fixture.
+    The martj42 feed lags (and is cached up to 7 days), so a game played today is
+    often not in it yet; the Odds-API ``/scores`` window and the durable results
+    ledger cover that gap. We add ONLY the WC games martj42 does not already have
+    (matched order-insensitively on the team pairing) so nothing is double-counted
+    and the historical rows are untouched. The model therefore trains on every
+    result, including ones that have rolled out of the live API window.
     """
-    history = schemas.completed_matches(fetch_international_results())
-    if not use_odds_api_scores:
-        return history
-    try:
-        from . import odds_api
+    raw = fetch_international_results(ttl_days=_WC_HISTORY_TTL_DAYS)
+    history = schemas.completed_matches(raw)
+    extra = None
+    if use_odds_api_scores:
+        try:
+            from . import odds_api
 
-        extra = odds_api.fetch_scores()
-    except Exception as exc:  # graceful: live scores are a bonus, not required
-        print(f"[world_cup] odds-api scores unavailable ({exc}); using history only.")
-        return history
-    if extra is None or len(extra) == 0:
-        return history
-    combined = pd.concat([history, schemas.completed_matches(extra)], ignore_index=True)
-    # Dedup on (date, teams) ONLY -- the same fixture on the same day is the
-    # duplicate to drop (keep the live row). Crucially this must include date:
-    # deduping on teams alone would collapse decades of repeated fixtures
-    # (e.g. every Brazil-vs-Argentina friendly) into one row and gut the history.
-    combined["_d"] = pd.to_datetime(combined["date"], errors="coerce").dt.normalize()
-    combined = combined.drop_duplicates(
-        subset=["_d", "home_team", "away_team"], keep="last"
-    ).drop(columns="_d")
+            extra = odds_api.fetch_scores()
+        except Exception as exc:  # graceful: live scores are a bonus, not required
+            print(f"[world_cup] odds-api scores unavailable ({exc}); using history.")
+    # All WC GROUP games seen anywhere (ledger + this run's live scores). Scoped
+    # to group pairings AND the group-stage date window so a live knockout result
+    # is not folded in via a stale pair-key (martj42 history below still carries
+    # knockouts once it absorbs them). group_end MUST come from the full fixture
+    # list (incl. not-yet-played games) -- deriving it from the completed-only
+    # frame would collapse it to the last SCORED date and drop today's results.
+    gs_all = wc2026_matches(raw)
+    group_end = (
+        pd.to_datetime(gs_all["date"], errors="coerce").max() if len(gs_all) else None
+    )
+    played = completed_wc_results(
+        extra_results=extra, use_store=use_store, store=store,
+        valid_pairs=group_pair_keys(), group_end=group_end,
+    )
+    if played.empty:
+        return history.sort_values("date", kind="mergesort").reset_index(drop=True)
+    have = _wc_scored_pair_keys(history)
+    new_mask = [
+        _pair_key(h, a) not in have
+        for h, a in zip(played["home_team"], played["away_team"])
+    ]
+    new = played[pd.Series(new_mask, index=played.index)]
+    if new.empty:
+        return history.sort_values("date", kind="mergesort").reset_index(drop=True)
+    combined = pd.concat([history, new], ignore_index=True)
     return combined.sort_values("date", kind="mergesort").reset_index(drop=True)
 
 
@@ -294,7 +555,7 @@ def simulate(
     from ..models import DixonColes, EloGoalsModel, PoissonXG, default_ensemble
     from ..simulation.tournament import simulate_tournament
 
-    history = fetch_international_results()
+    history = fetch_international_results(ttl_days=_WC_HISTORY_TTL_DAYS)
     groups = load_groups(refresh=refresh_groups_data)
 
     extra = None
@@ -306,6 +567,11 @@ def simulate(
         except Exception as exc:  # graceful: live scores are a bonus, not required
             print(f"[world_cup] odds-api scores unavailable ({exc}); using history only.")
 
+    # Persist every group game seen so far so it stays locked in on future runs
+    # even after it rolls out of the Odds-API window or the martj42 cache goes
+    # stale. Scope to the 72 group pairings so a knockout rematch can't overwrite
+    # a group result on the shared pair key.
+    update_results_store(history, extra, valid_pairs=group_pair_keys(groups))
     build_fixtures(history, groups, extra_results=extra)
     fixtures = loaders.load_fixtures(str(FIXTURES_CSV))
 
