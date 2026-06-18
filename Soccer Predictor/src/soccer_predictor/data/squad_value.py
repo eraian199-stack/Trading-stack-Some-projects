@@ -184,6 +184,79 @@ def build_squad_value(
     return df.reset_index(drop=True)
 
 
+def _latest_year_with_values(listing: dict[str, str]) -> int:
+    """Most recent edition whose ``players.json.gz`` still carries value histories.
+
+    The newest scrapes (2023+) dropped the embedded ``market_value_history``, so we
+    walk back to the freshest year that actually has values (currently 2022).
+    """
+    years = sorted(
+        {int(k.split("/")[0]) for k in listing if k.endswith("players.json.gz")},
+        reverse=True,
+    )
+    for year in years:
+        players = fetch_players(year)
+        if any(isinstance(p.get("market_value_history"), list) and p["market_value_history"]
+               for p in players[:200]):
+            return year
+    raise RuntimeError("no players.json.gz with market_value_history in the dataset")
+
+
+def build_current_ability(
+    *,
+    top_k: int = 20,
+    min_covered: int = 15,
+) -> pd.DataFrame:
+    """Per-nation CURRENT squad ABILITY (age-adjusted), for the live overlay.
+
+    Uses the most recent ``players.json.gz``: each player's latest valuation is
+    DE-AGED via :func:`players._age_value_retention` so a 33-year-old great is
+    rated on ability, not his age-discounted price (the user's "we want how good
+    they are, not their value" point). Same top-K-mean + coverage gate as the
+    historical builder, so under-covered nations fall back to pure Elo.
+
+    NOTE: this is a Transfermarkt-derived ability proxy. Cleaner pure-ability
+    ratings (FotMob/WhoScored) sit behind signed-header/anti-scrape walls, so they
+    are supported only via a user-supplied CSV (``world-cup --squad-csv``).
+    """
+    from .players import _age_value_retention
+
+    listing = _scraper_dir_listing()
+    year = _latest_year_with_values(listing)
+    players = fetch_players(year)
+    by_nat: dict[str, list[float]] = {}
+    for p in players:
+        nat = _citizenship(p)
+        if not nat:
+            continue
+        hist = p.get("market_value_history")
+        if not isinstance(hist, list) or not hist:
+            continue
+        last = max(hist, key=lambda pt: pt.get("x", 0) if isinstance(pt.get("x"), (int, float)) else 0)
+        y = last.get("y")
+        if not isinstance(y, (int, float)) or y <= 0:
+            continue
+        try:
+            age = float(last.get("age")) if last.get("age") not in (None, "") else None
+        except (TypeError, ValueError):
+            age = None
+        ability = float(y) / _age_value_retention(age) if age is not None else float(y)
+        by_nat.setdefault(nat, []).append(ability)
+    rows = []
+    for nat, vals in by_nat.items():
+        if len(vals) < min_covered:
+            continue
+        vals.sort(reverse=True)
+        core = vals[:top_k]
+        rows.append({
+            "team": normalize_team_name(nat),
+            "ability": float(sum(core) / len(core)),
+            "n_covered": len(vals),
+            "source_year": year,
+        })
+    return pd.DataFrame(rows).sort_values("ability", ascending=False).reset_index(drop=True)
+
+
 SQUAD_VALUE_CSV = Path("data/squad_value_by_year.csv")
 
 

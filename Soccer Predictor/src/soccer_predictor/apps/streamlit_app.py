@@ -23,6 +23,8 @@ that execs this module), or ``streamlit run src/soccer_predictor/apps/streamlit_
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -785,16 +787,48 @@ def _live_train() -> pd.DataFrame:
     return world_cup.live_training_frame(use_odds_api_scores=True)
 
 
+@st.cache_data(show_spinner="Building squad-ability overlay...", ttl=3600)
+def _live_ability() -> tuple[dict, str]:
+    """Optional ability overlay for the live model: a user CSV if present, else an
+    age-adjusted Transfermarkt ability proxy. Returns (Elo-point adjustments, source
+    label). Empty dict if unavailable (the overlay then no-ops -> pure Elo)."""
+    from ..data import players, squad_value
+    csv = Path("data/ability_overlay_2026.csv")
+    try:
+        if csv.exists():
+            raw = players.load_squad_strength_csv(str(csv))
+            src = "your ability_overlay_2026.csv"
+        else:
+            df = squad_value.build_current_ability()
+            raw = dict(zip(df["team"], df["ability"]))
+            yr = int(df["source_year"].iloc[0]) if len(df) else "?"
+            src = f"age-adjusted Transfermarkt value ({yr} snapshot, de-aged)"
+    except Exception as exc:
+        return {}, f"unavailable ({exc})"
+    adj = players.to_elo_adjustment(raw, spread=60.0, log=True) if raw else {}
+    return adj, src
+
+
 @st.cache_resource(show_spinner="Fitting model on real history...")
-def _live_model(model_label: str, fingerprint: str) -> object:
+def _live_model(model_label: str, fingerprint: str, ability_w: float = 0.0) -> object:
     del fingerprint  # cache key only; new/changed results -> new key -> refit
     factory = MODEL_FACTORIES[model_label]
+    if ability_w > 0:
+        base = factory()
+        if isinstance(base, EloGoalsModel):  # only the Elo engine takes a squad overlay
+            adj, _ = _live_ability()
+            if adj:
+                return EloGoalsModel(
+                    squad_strength=adj, squad_weight=ability_w
+                ).fit(_live_train().copy())
     return factory().fit(_live_train().copy())
 
 
 @st.cache_data(show_spinner="Simulating World Cup 2026...", ttl=900)
-def _live_wc(model_label: str, n_sims: int, anchor: bool, fingerprint: str) -> pd.DataFrame:
-    model = _live_model(model_label, fingerprint)
+def _live_wc(
+    model_label: str, n_sims: int, anchor: bool, fingerprint: str, ability_w: float = 0.0
+) -> pd.DataFrame:
+    model = _live_model(model_label, fingerprint, ability_w)
     groups = world_cup.load_groups()
     # Lock in games already played (history + live Odds-API results + ledger).
     world_cup.build_fixtures(_live_history(), groups, extra_results=_live_scores())
@@ -835,6 +869,15 @@ def _tab_world_cup() -> None:
         "(the strongest signal). Future knockout matchups use the pure model.",
     )
     go = c4.button("Run", type="primary")
+    ability_on = st.toggle(
+        "Squad-ability overlay (experimental, NOT backtested)", value=False,
+        key="wc_ability",
+        help="Tilt the Elo engine toward squad ABILITY (age-adjusted Transfermarkt "
+        "value, or your own data/ability_overlay_2026.csv). Backtested on past WCs "
+        "this did NOT beat plain Elo, and the market anchor already prices ability "
+        "— so it is off by default and only for exploring. Under-covered nations "
+        "fall back to pure Elo. Only affects the Elo model.",
+    )
     if c4.button("🔄 Refresh live data"):
         # Force a fresh martj42 download (bypass the disk cache) so a just-played
         # game shows even if the cached feed predates it, then drop every cached
@@ -844,7 +887,7 @@ def _tab_world_cup() -> None:
         except Exception:
             pass
         for fn in (_live_history, _live_scores, _live_results_store,
-                   _live_train, _live_model, _live_wc, _live_odds):
+                   _live_train, _live_ability, _live_model, _live_wc, _live_odds):
             try:
                 fn.clear()
             except Exception:
@@ -855,6 +898,7 @@ def _tab_world_cup() -> None:
                 "locks in the group games already played (incl. today's live results). "
                 "Use 🔄 Refresh after a match finishes.")
         return
+    ability_w = 0.5 if ability_on else 0.0  # modest; >0.5 hurt in the backtest
     try:
         fingerprint = _live_results_fingerprint()  # content key: refit on any change
         played = int(
@@ -862,7 +906,7 @@ def _tab_world_cup() -> None:
                 _live_history(), world_cup.load_groups(), extra_results=_live_scores()
             ).pipe(lambda d: (d["home_score"] != "").sum())
         )
-        sims = _live_wc(model_label, n_sims, anchor, fingerprint)
+        sims = _live_wc(model_label, n_sims, anchor, fingerprint, ability_w)
     except Exception as exc:
         st.error(f"Live World Cup pipeline failed: {exc}")
         return
@@ -870,6 +914,17 @@ def _tab_world_cup() -> None:
         f"{played}/72 group games played and locked in (incl. live results)"
         + (" · anchored to live market odds" if anchor else " · pure model (no anchor)")
     )
+    if ability_on:
+        _adj, _src = _live_ability()
+        if not _adj:
+            st.warning(f"Ability overlay unavailable — using pure model. ({_src})")
+        elif model_label != "Elo":
+            st.info("The ability overlay only affects the Elo model; pick Elo to use it.")
+        else:
+            st.caption(
+                f"⚗️ Experimental ability overlay ON ({len(_adj)} teams, source: {_src}) "
+                "— not backtested; this did not beat plain Elo on past World Cups."
+            )
     cols = st.columns(3)
     top = sims.iloc[0]
     cols[0].metric("Favourite", str(top["team"]), f"{top['champion_probability']:.1%}")

@@ -191,6 +191,25 @@ def test_squad_value_asof_cutoff_and_coverage_gate(monkeypatch):
     assert abs(row["squad_value_eur"] - 15_500_000) < 1.0
 
 
+def test_build_current_ability_deages_veterans(monkeypatch):
+    """The live ability overlay de-ages value so a 34-yo squad is rated on ability
+    (value / age-retention), not its age-discounted price."""
+    from soccer_predictor.data import squad_value as sv
+    from soccer_predictor.data.players import _age_value_retention
+
+    monkeypatch.setattr(sv, "_scraper_dir_listing", lambda: {"2022/players.json.gz": "x"})
+    monkeypatch.setattr(sv, "fetch_players", lambda year: [
+        {"citizenship": "Testland", "name": f"P{i}",
+         "market_value_history": [{"x": 1, "y": (i + 1) * 1_000_000, "age": "34"}]}
+        for i in range(16)
+    ])
+    df = sv.build_current_ability(top_k=10, min_covered=15)
+    row = df[df["team"] == "Testland"].iloc[0]
+    expected = (sum(range(7, 17)) * 1_000_000 / 10) / _age_value_retention(34.0)  # top-10 mean, de-aged
+    assert abs(row["ability"] - expected) < 1.0
+    assert int(row["source_year"]) == 2022
+
+
 def test_actual_stage_reach_from_bracket():
     """Stage participation is derived from who PLAYED each round (penalty-proof),
     the third-place playoff is skipped, and the final is the last match."""

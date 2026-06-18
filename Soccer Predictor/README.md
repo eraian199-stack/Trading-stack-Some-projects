@@ -232,8 +232,11 @@ See [docs/data_sources.md](docs/data_sources.md) for the full free-vs-paid map.
   `backtest-world-cups --squad`. So squad value stays OFF, like the other
   overlays. Player *ability* ratings (FotMob/WhoScored) are a cleaner signal but
   only exist ~2017+ (two WCs — no backtest power) and the live model already
-  anchors to the market, which prices ability. The overlay remains available for
-  live experimentation via `world-cup --squad-csv`, off by default.
+  anchors to the market, which prices ability. The overlay is still available for
+  live experimentation: a **"Squad-ability overlay (experimental)"** toggle in the
+  World Cup tab (off by default) tilts the Elo engine toward age-adjusted squad
+  ability — or your own `data/ability_overlay_2026.csv` (e.g. FotMob ratings) —
+  clearly labelled not-backtested, with under-covered nations falling back to Elo.
 - A model is only as fresh as its data; without xG / lineups / injuries / odds it
   cannot see them.
 - **Positive betting ROI is a hypothesis, not proof.** Beating the *closing* line
