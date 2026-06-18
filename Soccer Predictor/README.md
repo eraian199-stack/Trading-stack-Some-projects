@@ -201,8 +201,10 @@ can never overwrite a group game.
   anchor, and the edge scanner.
 - **Club results + odds:** football-data.co.uk (one CSV per league per season).
 - **Elo:** ClubElo (club) / the built-in margin-weighted Elo (international).
-- **Squad strength (optional overlay):** Transfermarkt national-team squad value /
-  age-adjusted ability / league tier, via `fetch-ratings` → `world-cup --squad-csv`.
+- **Squad strength (optional overlay, off by default):** live Transfermarkt value
+  via `fetch-ratings` → `world-cup --squad-csv`; *historical* point-in-time value
+  (for backtesting) from the CC0 `dcaribou/transfermarkt-datasets` release via
+  `data/squad_value.py`. Backtested and found not to beat Elo (see limitations).
 - **xG (club only):** Understat via `understatapi`. **Heads-up:** FBref removed xG
   on 2026-01-20; Understat (top-5 European leagues + RFPL) is the practical free
   source as of mid-2026. xG does **not** cover national teams.
@@ -222,9 +224,16 @@ See [docs/data_sources.md](docs/data_sources.md) for the full free-vs-paid map.
   not reproduce the exact published mapping for all cases). Such assumptions are
   carried on `TournamentFormat.notes` and labelled approximate. Group tie-breakers
   approximate the full FIFA drawing-of-lots procedure.
-- Squad-strength overlays are **current-only** (no free historical squads) and
-  therefore not backtestable; they overlap the market anchor, which already prices
-  ability. Treat them as a minor tilt.
+- **Squad strength was backtested and does not help.** Using point-in-time
+  Transfermarkt squad value (CC0 dataset, joined as-of each kickoff for WCs
+  2014/2018/2022), an Elo+squad overlay does **not** beat plain Elo out of sample
+  — a tiny weight is within noise and any real weight hurts (it doesn't even lift
+  France 2018's pre-tournament rank above #5). Reproduce with
+  `backtest-world-cups --squad`. So squad value stays OFF, like the other
+  overlays. Player *ability* ratings (FotMob/WhoScored) are a cleaner signal but
+  only exist ~2017+ (two WCs — no backtest power) and the live model already
+  anchors to the market, which prices ability. The overlay remains available for
+  live experimentation via `world-cup --squad-csv`, off by default.
 - A model is only as fresh as its data; without xG / lineups / injuries / odds it
   cannot see them.
 - **Positive betting ROI is a hypothesis, not proof.** Beating the *closing* line

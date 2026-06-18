@@ -22,6 +22,9 @@ outputs/
 # Live results ledger: accumulates on disk as games are played (per-deployment
 # state, rebuilt from the feeds on a fresh checkout). Not a committed artifact.
 data/world_cup_2026_results.csv
+# Squad-value table: derived from the external CC0 Transfermarkt dataset,
+# rebuilt on demand by data/squad_value.py. Not a committed artifact.
+data/squad_value_by_year.csv
 
 # Original uploaded reference framework (inputs that were merged into the stack)
 docs/files/

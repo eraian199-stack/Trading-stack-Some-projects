@@ -161,6 +161,36 @@ def test_identify_and_backtest_world_cups():
     assert 0.0 < res["pooled"]["log_loss"] < 3.0
 
 
+def test_squad_value_asof_cutoff_and_coverage_gate(monkeypatch):
+    """Squad value uses the last valuation ON/BEFORE kickoff (no leakage) and
+    omits under-covered nations so they fall back to pure Elo."""
+    from soccer_predictor.data import squad_value as sv
+
+    before = int(pd.Timestamp("2017-01-01").timestamp() * 1000)
+    after = int(pd.Timestamp("2019-01-01").timestamp() * 1000)  # after the 2018 WC
+
+    def fake_players(year):
+        rows = []
+        for i in range(20):  # covered nation: 20 players, values 1..20 M as-of 2017
+            rows.append({"citizenship": "Testland", "name": f"P{i}",
+                         "market_value_history": [
+                             {"x": before, "y": (i + 1) * 1_000_000},
+                             {"x": after, "y": 999_000_000}]})  # future -> must be ignored
+        for i in range(3):  # under-covered nation: 3 players -> excluded
+            rows.append({"citizenship": "Smalland", "name": f"S{i}",
+                         "market_value_history": [{"x": before, "y": 5_000_000}]})
+        return rows
+
+    monkeypatch.setattr(sv, "fetch_players", fake_players)
+    df = sv.build_squad_value(2018, top_k=10, min_covered=15)
+    teams = set(df["team"])
+    assert "Testland" in teams and "Smalland" not in teams  # coverage gate
+    row = df[df["team"] == "Testland"].iloc[0]
+    # As-of 2018 each value = the 2017 point (the 2019 point is after kickoff);
+    # top-10 of 1..20 M is 11..20 M, mean 15.5 M.
+    assert abs(row["squad_value_eur"] - 15_500_000) < 1.0
+
+
 def test_actual_stage_reach_from_bracket():
     """Stage participation is derived from who PLAYED each round (penalty-proof),
     the third-place playoff is skipped, and the final is the last match."""

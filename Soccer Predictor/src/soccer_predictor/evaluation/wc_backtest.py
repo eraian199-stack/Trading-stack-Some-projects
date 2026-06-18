@@ -78,6 +78,17 @@ def _row_probs(model, home: str, away: str, neutral: bool) -> np.ndarray:
     return np.asarray(model.predict_proba(frame), dtype=float)[0]
 
 
+def _make_model(model_factory: Callable, year: int) -> object:
+    """Build a model for one edition, supporting both zero-arg and edition-aware
+    factories. ``factory(year)`` is tried first (so a squad/point-in-time overlay
+    can vary per edition); a plain ``factory()`` is the fallback, so every
+    existing zero-arg lambda keeps working unchanged."""
+    try:
+        return model_factory(year)
+    except TypeError:
+        return model_factory()
+
+
 def backtest_world_cups(
     history: pd.DataFrame,
     model_factory: Callable[[], object],
@@ -109,7 +120,7 @@ def backtest_world_cups(
         train = history[history["date"] < start]
         if len(train) < 200 or len(matches) == 0:
             continue
-        model = model_factory()
+        model = _make_model(model_factory, year)
         model.fit(train.copy())
 
         probs, outcomes = [], []
@@ -295,7 +306,7 @@ def simulate_past_world_cup(
     train = history[history["date"] < start]
     if len(train) < 200:
         return None
-    model = model_factory()
+    model = _make_model(model_factory, year)
     model.fit(train.copy())
     sims = simulate_tournament(
         model, groups, n_simulations=n_simulations, seed=seed, fmt=fmt
@@ -376,7 +387,7 @@ def backtest_tournament(
         train = history[history["date"] < start]
         if len(train) < 200:
             continue
-        model = model_factory()
+        model = _make_model(model_factory, year)
         model.fit(train.copy())
         sims = simulate_tournament(
             model, groups, n_simulations=n_simulations, seed=seed, fmt=fmt
@@ -489,7 +500,7 @@ def backtest_champions(
         train = history[history["date"] < start]
         if len(train) < 200:
             continue
-        model = model_factory()
+        model = _make_model(model_factory, year)
         model.fit(train.copy())
         sims = simulate_tournament(
             model, groups, n_simulations=n_simulations, seed=seed, fmt=fmt

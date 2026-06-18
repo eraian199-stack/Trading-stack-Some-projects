@@ -554,6 +554,33 @@ def cmd_backtest_world_cups(args: argparse.Namespace) -> int:
             f"(lower = better; below uniform = real skill).",
             file=sys.stderr,
         )
+    if getattr(args, "squad", False):
+        try:
+            from .data import players, squad_value
+            squad_value.build_squad_value_by_year()  # fetch + cache (CC0 Transfermarkt)
+            byyear = squad_value.load_squad_value_by_year()
+        except Exception as exc:  # network / data unavailable -> skip gracefully
+            print(f"\nSquad-value ablation skipped ({exc}).", file=sys.stderr)
+            byyear = {}
+        if byyear:
+            adj = {y: players.to_elo_adjustment(byyear[y], spread=60.0, log=True)
+                   for y in byyear}
+            years = sorted(byyear)  # editions the CC0 data covers (2014/2018/2022)
+            sq = {
+                "elo": EloGoalsModel,
+                "elo+squad@0.5": lambda year: EloGoalsModel(
+                    squad_strength=adj.get(year), squad_weight=0.5),
+                "elo+squad@1.0": lambda year: EloGoalsModel(
+                    squad_strength=adj.get(year), squad_weight=1.0),
+            }
+            print(
+                f"\nSquad-value overlay ablation on {years} (point-in-time "
+                "Transfermarkt squad value, CC0; under-covered nations fall back to "
+                "pure Elo). Does talent-via-value beat plain Elo out-of-sample?",
+                file=sys.stderr,
+            )
+            sqlb = wc_backtest.compare_models_on_world_cups(history, sq, years=years)
+            print(sqlb.round(4).to_csv())
     if args.out:
         lb.to_csv(args.out)
         print(f"Wrote leaderboard to {args.out}", file=sys.stderr)
@@ -1058,6 +1085,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_bw.add_argument(
         "--champions", action="store_true",
         help="Alias for --tournament (back-compat).",
+    )
+    p_bw.add_argument(
+        "--squad", action="store_true",
+        help="Also run the squad-VALUE overlay ablation (point-in-time "
+             "Transfermarkt value, 2014/2018/2022) vs plain Elo. Backtested "
+             "result: it does NOT beat Elo out-of-sample (kept off).",
     )
     p_bw.add_argument("--sims", type=int, default=4000, help="Tournament-backtest runs.")
     p_bw.add_argument("--out", default=None, help="Write the leaderboard CSV here.")
