@@ -237,18 +237,21 @@ def _club_tier(club: object) -> tuple[float, bool]:
 def _age_value_retention(age: float) -> float:
     """Approx ratio of market VALUE to peak-ability value at a given age.
 
-    Market value is age-discounted: a 34-year-old elite is cheap but still elite,
-    while a teenager carries a potential premium. Dividing value by this ratio
-    recovers an *ability-equivalent* value. Heuristic (it cannot be validated on
-    free data), tuned mainly to undo the veteran under-valuation:
+    Market value distorts ABILITY in BOTH directions, symmetrically here (~0.06
+    per year off the peak window): a 34-year-old elite is cheap but still elite
+    (boost), while a 19-year-old carries a big POTENTIAL premium -- his price
+    bakes in future ability + resale upside, not what he is now (trim). Dividing
+    value by this ratio recovers an *ability-equivalent* value. Heuristic (it
+    cannot be validated on free data; FIFA `overall` already separates current
+    ability from potential, which is why FIFA is the primary, un-aged source):
 
-      <=24 ramps 1.12 -> 1.0 (mild young-potential premium)
-      24-28 = 1.0 (peak window: value ~ ability)
-      >28 declines ~0.06/yr, floored at 0.25 (veterans worth far less than their ability)
+      <24  : 1.0 + 0.06/yr below 24, capped 1.6 (e.g. 18 -> 1.36, 21 -> 1.18)
+      24-28: 1.0 (peak window: value ~ ability)
+      >28  : 1.0 - 0.06/yr, floored 0.25 (e.g. 32 -> 0.76, 38 -> 0.40)
     """
     a = float(age)
-    if a <= 24.0:
-        return 1.12 - (a - 18.0) * (0.12 / 6.0) if a >= 18.0 else 1.12
+    if a < 24.0:
+        return min(1.6, 1.0 + 0.06 * (24.0 - a))
     if a <= 28.0:
         return 1.0
     return max(0.25, 1.0 - 0.06 * (a - 28.0))

@@ -225,6 +225,17 @@ def test_combine_ability_blends_only_where_present():
     assert abs(out2["A"] - out["A"]) < 1e-9
 
 
+def test_age_retention_trims_young_and_boosts_old_symmetrically():
+    """De-aging must cut both ways: young value is inflated by potential (ratio >1
+    -> trimmed), veteran value is age-discounted (ratio <1 -> boosted), ~0.06/yr."""
+    from soccer_predictor.data.players import _age_value_retention
+    assert _age_value_retention(26) == 1.0
+    assert _age_value_retention(18) > 1.3            # teenager: big potential premium trimmed
+    assert _age_value_retention(34) < 0.7            # veteran: boosted
+    assert abs(_age_value_retention(20) - (1.0 + 0.06 * 4)) < 1e-9   # 1.24
+    assert abs(_age_value_retention(32) - (1.0 - 0.06 * 4)) < 1e-9   # 0.76 (symmetric)
+
+
 def test_build_tm_ability_deages_as_of(monkeypatch):
     """Per-edition TM ability uses the as-of-kickoff valuation (no leakage) and
     de-ages it (a 33-yo great rated on ability, not his discounted price)."""
