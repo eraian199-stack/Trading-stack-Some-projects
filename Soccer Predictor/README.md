@@ -163,9 +163,14 @@ Five tabs: **🏆 World Cup 2026 (live)**, **Match Predictor**, **Tournament
 Simulator**, **Backtest Lab**, and **Betting Edge Scanner** (model fair odds vs
 market vs edge, with calibration warnings).
 
-The **Backtest Lab** tab has a World Cup backtest with an edition dropdown (every
-World Cup back to 1998, or all of them pooled): it shows the match-level metrics
-against the no-skill floor. Pick a single past edition and it also shows that
+The **Backtest Lab** tab has a World Cup backtest with edition and **model**
+dropdowns (every World Cup back to 1998, or all pooled): it shows the match-level
+metrics against the no-skill floor. The model dropdown offers **Elo** (the
+national-team engine) and **Dixon-Coles** — the latter runs on international data
+but, being a club model on neutral venues, is slow (~30s/fit) and scores worse
+than the no-skill floor, so it's there only to show *why* Elo is used; xG /
+Ensemble need club xG that internationals lack, so they're omitted. Pick a single
+past edition and it also shows that
 tournament's reconstructed groups and the model's pre-tournament win / advancement
 probability for every team — the same view as the live 2026 tab — next to how far
 each team actually got. "All since 1998" can additionally Monte-Carlo every bracket

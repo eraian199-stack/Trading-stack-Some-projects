@@ -520,9 +520,14 @@ def cmd_backtest_world_cups(args: argparse.Namespace) -> int:
         "elo+importance": lambda: EloGoalsModel(use_importance=True),
         "elo+form": lambda: EloGoalsModel(form_weight=args.form_weight or 250.0),
         "elo+pedigree": lambda: EloGoalsModel(pedigree_weight=0.5),
+        # Club model on international data: slow + miscalibrated on neutral venues
+        # (scores worse than no-skill) -- included so it can be compared, not used.
+        "dixon-coles": DixonColes,
     }
     if args.model != "all":
         factories = {args.model: factories.get(args.model, EloGoalsModel)}
+    elif "dixon-coles" in factories:
+        factories.pop("dixon-coles")  # 'all' = Elo variants only; DC opt-in (slow)
     print(
         f"Backtesting on World Cups since {args.min_year} (match-level, "
         "out-of-sample). Historical market odds are not free, so only model "
@@ -1061,7 +1066,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_bw.add_argument(
         "--model",
-        choices=["all", "elo", "elo+importance", "elo+form", "elo+pedigree"],
+        choices=["all", "elo", "elo+importance", "elo+form", "elo+pedigree",
+                 "dixon-coles"],
         default="all",
         help="Variant to backtest (default: all).",
     )

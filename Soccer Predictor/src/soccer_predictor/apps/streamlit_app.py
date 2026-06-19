@@ -48,6 +48,13 @@ MODEL_FACTORIES = {
     "Ensemble": default_ensemble,
 }
 
+# Models that can run on INTERNATIONAL / World Cup data. xG/Ensemble need club xG
+# (internationals have none -> they error), so they are excluded. Dixon-Coles runs
+# but is a CLUB model: on neutral-venue international data with 300+ sparse teams it
+# is slow (~30s/fit) and miscalibrated (worse than the no-skill floor; degenerate
+# tournament sims) -- offered only so you can SEE that. Elo is the engine here.
+WC_MODELS = {"Elo": EloGoalsModel, "Dixon-Coles": DixonColes}
+
 SAMPLE_BANNER = (
     "SAMPLE / SYNTHETIC DATA IN USE -- every number below is generated demo data "
     "and is **NOT real**. Load a real CSV in the sidebar before trusting any "
@@ -386,8 +393,8 @@ WC_BACKTEST_EDITIONS = [
 
 
 @st.cache_data(show_spinner="Backtesting past World Cups...", ttl=3600)
-def _wc_matchlevel_backtest(edition: str) -> dict:
-    """Match-level OOS backtest of the Elo engine on past World Cups (+ no-skill floor).
+def _wc_matchlevel_backtest(edition: str, model_label: str = "Elo") -> dict:
+    """Match-level OOS backtest of a model on past World Cups (+ no-skill floor).
 
     Every finals match is predicted pre-kickoff by a model fit only on prior
     international results. The bar is the no-skill floor (always predict the H/D/A
@@ -396,7 +403,7 @@ def _wc_matchlevel_backtest(edition: str) -> dict:
     hist = _live_history()
     years = None if edition == "All since 1998" else [int(edition)]
     res = wc_backtest.backtest_world_cups(
-        hist, EloGoalsModel, years=years, min_year=1998, update_within=True
+        hist, WC_MODELS[model_label], years=years, min_year=1998, update_within=True
     )
     out = np.asarray(res["outcomes"], dtype=object)
     floor: dict = {}
@@ -408,12 +415,12 @@ def _wc_matchlevel_backtest(edition: str) -> dict:
 
 
 @st.cache_data(show_spinner="Simulating past World Cups...", ttl=3600)
-def _wc_tournament_backtest(edition: str, n_sims: int) -> dict:
+def _wc_tournament_backtest(edition: str, n_sims: int, model_label: str = "Elo") -> dict:
     """Full tournament-simulation scorecard (champion rank + stage calibration)."""
     hist = _live_history()
     years = None if edition == "All since 1998" else [int(edition)]
     return wc_backtest.backtest_tournament(
-        hist, EloGoalsModel, years=years, min_year=1998, n_simulations=n_sims
+        hist, WC_MODELS[model_label], years=years, min_year=1998, n_simulations=n_sims
     )
 
 
@@ -466,10 +473,13 @@ def _wc_ability_leaderboard() -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner="Simulating that World Cup...", ttl=3600)
-def _wc_past_simulation(year: int, n_sims: int, ability_w: float = 0.0) -> dict | None:
-    """Groups + full per-team win/advancement probabilities for one past edition,
-    optionally tilted toward FIFA squad ability."""
-    if ability_w > 0:
+def _wc_past_simulation(
+    year: int, n_sims: int, ability_w: float = 0.0, model_label: str = "Elo"
+) -> dict | None:
+    """Groups + full per-team win/advancement probabilities for one past edition.
+    The FIFA squad-ability tilt only applies to the Elo engine (only Elo has a
+    squad term); other models are simulated as-is."""
+    if ability_w > 0 and model_label == "Elo":
         adj = _wc_fifa_ability()
         if year in adj:
             fac = lambda yr: EloGoalsModel(  # noqa: E731
@@ -477,7 +487,7 @@ def _wc_past_simulation(year: int, n_sims: int, ability_w: float = 0.0) -> dict 
             return wc_backtest.simulate_past_world_cup(
                 _live_history(), fac, year, n_simulations=n_sims)
     return wc_backtest.simulate_past_world_cup(
-        _live_history(), EloGoalsModel, year, n_simulations=n_sims
+        _live_history(), WC_MODELS[model_label], year, n_simulations=n_sims
     )
 
 
@@ -497,10 +507,12 @@ def _actual_finish(team: str, reached: dict | None) -> str:
     return "Group stage"
 
 
-def _render_past_wc_simulation(year: int, n_sims: int, ability_w: float = 0.0) -> None:
+def _render_past_wc_simulation(
+    year: int, n_sims: int, ability_w: float = 0.0, model_label: str = "Elo"
+) -> None:
     """Groups + pre-tournament win/advancement probabilities for one past edition,
     shown next to what actually happened (the live tab's view, run on history)."""
-    res = _wc_past_simulation(year, n_sims, ability_w)
+    res = _wc_past_simulation(year, n_sims, ability_w, model_label)
     if res is None:
         st.info("Couldn't reconstruct that edition's groups from the fixtures.")
         return
@@ -551,34 +563,49 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
     st.markdown("#### 🏆 World Cup backtest (international, 1998+)")
     st.caption(
         "The high-power test: every World Cup finals match since 1998 predicted "
-        "pre-kickoff by the Elo engine fit only on prior results (no leakage). The "
-        "bar is the no-skill floor (always predict the base rate) -- the gap is the "
-        "model's real skill. Historical odds aren't free, so the market isn't shown."
+        "pre-kickoff by the chosen model, fit only on prior results (no leakage). "
+        "The bar is the no-skill floor (predict the base rate) -- the gap is real "
+        "skill. Historical odds aren't free, so the market isn't shown."
     )
-    e1, e2, e3 = st.columns([1.2, 1.4, 1])
+    e1, e2, e3 = st.columns([1.1, 1, 1])
     edition = e1.selectbox("Edition", WC_BACKTEST_EDITIONS, key="wc_bt_edition")
-    run_tourney = e2.checkbox(
+    model_label = e2.selectbox(
+        "Model", list(WC_MODELS), key="wc_bt_model",
+        help="Elo is the national-team engine. Dixon-Coles is a CLUB model — it runs "
+        "on international data but is slow (~30s/fit) and miscalibrated on neutral "
+        "venues, so it scores worse than the no-skill floor and gives degenerate "
+        "sims; offered so you can see that. xG / Ensemble need club xG (internationals "
+        "have none), so they are omitted.",
+    )
+    n_sims = int(e3.slider("Sim runs", 1000, 8000, 3000, step=1000, key="wc_bt_sims"))
+    cc1, cc2 = st.columns(2)
+    run_tourney = cc1.checkbox(
         "Also simulate the bracket (champion rank + calibration)",
         value=False, key="wc_bt_tourney",
         help="Monte-Carlo each completed tournament the way the live tab does — "
         "slower. Scores how well the simulated advancement probabilities matched "
         "reality.",
     )
-    n_sims = int(e3.slider("Sim runs", 1000, 8000, 3000, step=1000, key="wc_bt_sims"))
-    ability_on = st.toggle(
-        "Test the FIFA squad-ability overlay (experimental)", value=False,
+    ability_on = cc2.toggle(
+        "FIFA squad-ability overlay (experimental, Elo only)", value=False,
         key="wc_bt_ability",
         help="Squad ability as a pre-tournament overlay, blended z-score-wise from "
         "EA-FC/FIFA overall ratings + age-adjusted Transfermarkt ability (+ any "
         "data/ability_overlay_<year>.csv you add). Adds a plain-Elo vs Elo+ability "
         "head-to-head on the clean editions (2018 & 2022) and tilts the "
-        "single-edition probabilities. Backtest shows a SMALL improvement over Elo, "
-        "but only 2 clean editions exist (underpowered) — exploratory.",
+        "single-edition probabilities. Small OOS improvement, 2 clean editions "
+        "(underpowered) — exploratory. Applies to Elo only.",
     )
-    ability_w = 0.5 if ability_on else 0.0
+    ability_w = 0.5 if (ability_on and model_label == "Elo") else 0.0
+    if model_label != "Elo":
+        st.caption(
+            "⚠️ Dixon-Coles is a club model run on neutral-venue international data — "
+            "expect weak/erratic numbers (it's here to show why Elo is the engine for "
+            "national teams), and it's slow (~30s/fit). Ability overlay is Elo-only."
+        )
     if st.button("Run World Cup backtest", type="primary", key="wc_bt_run"):
         try:
-            ml = _wc_matchlevel_backtest(edition)
+            ml = _wc_matchlevel_backtest(edition, model_label)
         except Exception as exc:
             st.error(f"World Cup backtest failed: {exc}")
         else:
@@ -603,7 +630,7 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
                     f"{floor['log_loss'] - p['log_loss']:+.4f} log loss over "
                     f"{ml['n']} matches — that gap is the skill."
                 )
-                if ability_on:
+                if ability_on and model_label == "Elo":
                     try:
                         lb = _wc_ability_leaderboard()
                         st.markdown(
@@ -631,7 +658,7 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
                             use_container_width=True,
                         )
                     if run_tourney:
-                        res = _wc_tournament_backtest(edition, n_sims)
+                        res = _wc_tournament_backtest(edition, n_sims, model_label)
                         eds = res.get("editions")
                         if eds is None or len(eds) == 0:
                             st.info("No completed tournament to simulate for that selection.")
@@ -656,7 +683,7 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
                         "tab for its groups and live, updating win probabilities."
                     )
                 else:
-                    _render_past_wc_simulation(int(edition), n_sims, ability_w)
+                    _render_past_wc_simulation(int(edition), n_sims, ability_w, model_label)
 
     st.divider()
 
@@ -973,7 +1000,12 @@ def _tab_world_cup() -> None:
         "Monte-Carlo'd from the model fit on real history through today."
     )
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
-    model_label = c1.selectbox("Model", list(MODEL_FACTORIES), key="wc_model")
+    model_label = c1.selectbox(
+        "Model", list(WC_MODELS), key="wc_model",
+        help="Elo is the national-team engine. Dixon-Coles (club model) runs but is "
+        "slow and miscalibrated on neutral international data; xG/Ensemble need club "
+        "xG that internationals lack, so they're omitted here.",
+    )
     n_sims = int(c2.slider("Simulations", 1000, 30000, 8000, step=1000, key="wc_sims"))
     anchor = c3.toggle(
         "Anchor to live market", value=True, key="wc_anchor",
