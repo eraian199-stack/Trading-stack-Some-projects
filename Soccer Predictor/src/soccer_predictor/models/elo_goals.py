@@ -21,7 +21,7 @@ strength difference (stronger team gets more mass below the diagonal).
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -119,6 +119,8 @@ class EloGoalsModel(ScorelineModel):
         squad_strength: dict[str, float] | None = None,
         squad_weight: float = 0.0,
         home_advantage_override: float | None = None,
+        hosts: Iterable[str] | None = None,
+        host_advantage: float = 0.0,
     ):
         """Map a national-team *effective rating* onto a goal supremacy and read
         every market off the resulting Dixon-Coles score matrix.
@@ -165,6 +167,13 @@ class EloGoalsModel(ScorelineModel):
         self.squad_weight = squad_weight
         self.squad_strength = self._center_squad(squad_strength)
         self.home_advantage_override = home_advantage_override
+        # Host advantage: tournament hosts play on home soil even though WC games
+        # are flagged neutral. `host_advantage` Elo points are added to each host's
+        # effective rating in every fixture (so it flows into every market). Host
+        # nations are normalised so they match the fixture team names.
+        from ..data.aliases import normalize_team_name as _norm_team
+        self.host_advantage = float(host_advantage)
+        self.hosts = {_norm_team(t) for t in (hosts or ())}
         self.elo = self._new_elo()
         self.elo_slow = None
         self.form: dict[str, float] = {}
@@ -301,6 +310,8 @@ class EloGoalsModel(ScorelineModel):
             rating += self.pedigree_weight * (self.elo_slow.rating(t) - self.elo.rating(t))
         if self.squad_weight and t in self.squad_strength:
             rating += self.squad_weight * self.squad_strength[t]
+        if self.host_advantage and t in self.hosts:
+            rating += self.host_advantage  # tournament host plays on home soil
         return rating
 
     # -- expected goal rates from the effective rating --------------------

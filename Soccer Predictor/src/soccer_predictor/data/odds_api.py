@@ -38,6 +38,7 @@ ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 
 # Common soccer sport keys. Use list_sports() for the authoritative live list.
 WORLD_CUP_SPORT = "soccer_fifa_world_cup"
+WORLD_CUP_WINNER_SPORT = "soccer_fifa_world_cup_winner"  # outright/futures market
 SOCCER_SPORT_KEYS: dict[str, str] = {
     "world_cup": "soccer_fifa_world_cup",
     "euros": "soccer_uefa_european_championship",
@@ -265,6 +266,48 @@ def fetch_match_odds(
         df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.tz_localize(None)
         df = df.sort_values("date").reset_index(drop=True)
     return df
+
+
+def fetch_outrights(
+    sport: str = WORLD_CUP_WINNER_SPORT,
+    *,
+    regions: str = "eu",
+    aggregate: str = "avg",
+    cache: bool = True,
+    ttl_hours: float = 6.0,
+) -> dict[str, float]:
+    """De-vigged tournament-WINNER (futures) probabilities, ``{team: prob}``.
+
+    The outright market is the bookmakers' direct champion-probability estimate --
+    the single best title forecast available, and the market is the ceiling no
+    model has beaten OOS here. Odds are aggregated across books then de-vigged by
+    proportional normalisation (outright overrounds are large), so the returned
+    probabilities sum to 1. Empty dict if the market has no prices / no key.
+    Futures move slowly, so the default TTL is long to spare the free-tier quota.
+    """
+    games = _api_get(
+        f"/sports/{sport}/odds",
+        {"regions": regions, "markets": "outrights", "oddsFormat": "decimal",
+         "dateFormat": "iso"},
+        cache=cache,
+        ttl_hours=ttl_hours,
+    )
+    prices: dict[str, list[float]] = {}
+    for game in games or []:
+        for bk in game.get("bookmakers", []):
+            for market in bk.get("markets", []):
+                if market.get("key") != "outrights":
+                    continue
+                for oc in market.get("outcomes", []):
+                    name, price = oc.get("name"), oc.get("price")
+                    if name and isinstance(price, (int, float)) and price > 1:
+                        prices.setdefault(normalize_team_name(name), []).append(float(price))
+    if not prices:
+        return {}
+    agg = (lambda v: max(v)) if aggregate == "best" else (lambda v: sum(v) / len(v))
+    implied = {t: 1.0 / agg(v) for t, v in prices.items()}  # raw (overround > 1)
+    total = sum(implied.values())
+    return {t: p / total for t, p in implied.items()} if total > 0 else {}
 
 
 def fetch_scores(

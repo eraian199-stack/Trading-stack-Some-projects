@@ -225,6 +225,52 @@ def test_combine_ability_blends_only_where_present():
     assert abs(out2["A"] - out["A"]) < 1e-9
 
 
+def test_host_advantage_bumps_only_the_host():
+    """host_advantage adds Elo points to host teams' effective rating only, and
+    flows into a higher predicted goal rate for the host."""
+    from soccer_predictor.models.elo_goals import EloGoalsModel
+    host = EloGoalsModel(hosts=["Brazil"], host_advantage=50.0)
+    plain = EloGoalsModel(host_advantage=0.0)
+    # unseen teams sit at base_rating; the host gets exactly +50, others unchanged
+    assert host.effective_rating("Brazil") - plain.effective_rating("Brazil") == 50.0
+    assert host.effective_rating("France") == plain.effective_rating("France")
+    # and it raises the host's expected goal rate vs a neutral equal opponent
+    lam_host, _ = host._rates("Brazil", "France", neutral=True)
+    lam_plain, _ = plain._rates("Brazil", "France", neutral=True)
+    assert lam_host > lam_plain
+
+
+def test_fetch_outrights_devig(monkeypatch):
+    """Outright odds are aggregated across books and de-vigged to sum to 1."""
+    from soccer_predictor.data import odds_api
+    fake = [{"bookmakers": [{"markets": [{"key": "outrights", "outcomes": [
+        {"name": "France", "price": 2.0},   # raw implied 0.50
+        {"name": "Brazil", "price": 4.0},   # raw implied 0.25
+    ]}]}]}]
+    monkeypatch.setattr(odds_api, "_api_get", lambda *a, **k: fake)
+    m = odds_api.fetch_outrights(cache=False)
+    assert abs(sum(m.values()) - 1.0) < 1e-9          # de-vigged
+    assert abs(m["France"] - 2.0 / 3.0) < 1e-6        # 0.50 / 0.75
+    assert abs(m["Brazil"] - 1.0 / 3.0) < 1e-6        # 0.25 / 0.75
+
+
+def test_blend_champion_to_market_moves_toward_market_and_normalises():
+    from soccer_predictor.apps.streamlit_app import _blend_champion_to_market
+    sim = pd.DataFrame({
+        "team": ["Brazil", "France", "Spain"],
+        "champion_probability": [0.50, 0.20, 0.30],
+    })
+    market = {"Brazil": 0.10, "France": 0.40}  # Spain unpriced -> keeps its sim value
+    out = _blend_champion_to_market(sim, market, weight=0.5)
+    assert abs(out["champion_probability"].sum() - 1.0) < 1e-9
+    probs = dict(zip(out["team"], out["champion_probability"]))
+    assert probs["Brazil"] < 0.50      # pulled down toward 0.10
+    assert probs["France"] > 0.20      # pulled up toward 0.40
+    # market empty -> unchanged
+    same = _blend_champion_to_market(sim, {}, weight=0.5)
+    assert list(same["champion_probability"]) == [0.50, 0.20, 0.30]
+
+
 def test_penalty_shootout_shrinks_toward_coin_flip():
     """A penalty shootout is near-random: the favourite's open-play edge is shrunk
     toward 0.5 by shootout_skill (0 = pure coin flip, 1 = full edge)."""

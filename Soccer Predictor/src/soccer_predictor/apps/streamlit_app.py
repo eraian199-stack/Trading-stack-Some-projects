@@ -415,12 +415,30 @@ def _wc_matchlevel_backtest(edition: str, model_label: str = "Elo") -> dict:
 
 
 @st.cache_data(show_spinner="Simulating past World Cups...", ttl=3600)
-def _wc_tournament_backtest(edition: str, n_sims: int, model_label: str = "Elo") -> dict:
+def _wc_elo_factory(host_adv: float = 0.0, ability_by_year: dict | None = None,
+                    ability_w: float = 0.0):
+    """Edition-aware Elo factory: host home bump (per-edition WC_HOSTS) + optional
+    squad-ability tilt. Used in the all-neutral SIMULATION backtest path."""
+    def fac(year):
+        kw: dict = {}
+        if host_adv > 0:
+            kw.update(hosts=wc_backtest.WC_HOSTS.get(year, ()), host_advantage=host_adv)
+        if ability_w > 0 and ability_by_year and year in ability_by_year:
+            kw.update(squad_strength=ability_by_year.get(year), squad_weight=ability_w)
+        return EloGoalsModel(**kw)
+    return fac
+
+
+def _wc_tournament_backtest(edition: str, n_sims: int, model_label: str = "Elo",
+                            host_adv: float = 0.0) -> dict:
     """Full tournament-simulation scorecard (champion rank + stage calibration)."""
     hist = _live_history()
     years = None if edition == "All since 1998" else [int(edition)]
+    factory = WC_MODELS[model_label]
+    if model_label == "Elo" and host_adv > 0:
+        factory = _wc_elo_factory(host_adv=host_adv)
     return wc_backtest.backtest_tournament(
-        hist, WC_MODELS[model_label], years=years, min_year=1998, n_simulations=n_sims
+        hist, factory, years=years, min_year=1998, n_simulations=n_sims
     )
 
 
@@ -503,18 +521,17 @@ def _wc_ability_leaderboard(include_actual_xi: bool = False) -> pd.DataFrame:
 
 @st.cache_data(show_spinner="Simulating that World Cup...", ttl=3600)
 def _wc_past_simulation(
-    year: int, n_sims: int, ability_w: float = 0.0, model_label: str = "Elo"
+    year: int, n_sims: int, ability_w: float = 0.0, model_label: str = "Elo",
+    host_adv: float = 0.0,
 ) -> dict | None:
     """Groups + full per-team win/advancement probabilities for one past edition.
-    The FIFA squad-ability tilt only applies to the Elo engine (only Elo has a
-    squad term); other models are simulated as-is."""
-    if ability_w > 0 and model_label == "Elo":
-        adj = _wc_fifa_ability()
-        if year in adj:
-            fac = lambda yr: EloGoalsModel(  # noqa: E731
-                squad_strength=adj.get(yr), squad_weight=ability_w)
-            return wc_backtest.simulate_past_world_cup(
-                _live_history(), fac, year, n_simulations=n_sims)
+    The FIFA squad-ability tilt and the host home bump only apply to the Elo engine
+    (only Elo has those terms); other models are simulated as-is."""
+    if model_label == "Elo" and (ability_w > 0 or host_adv > 0):
+        adj = _wc_fifa_ability() if ability_w > 0 else None
+        fac = _wc_elo_factory(host_adv=host_adv, ability_by_year=adj, ability_w=ability_w)
+        return wc_backtest.simulate_past_world_cup(
+            _live_history(), fac, year, n_simulations=n_sims)
     return wc_backtest.simulate_past_world_cup(
         _live_history(), WC_MODELS[model_label], year, n_simulations=n_sims
     )
@@ -537,14 +554,18 @@ def _actual_finish(team: str, reached: dict | None) -> str:
 
 
 def _render_past_wc_simulation(
-    year: int, n_sims: int, ability_w: float = 0.0, model_label: str = "Elo"
+    year: int, n_sims: int, ability_w: float = 0.0, model_label: str = "Elo",
+    host_adv: float = 0.0,
 ) -> None:
     """Groups + pre-tournament win/advancement probabilities for one past edition,
     shown next to what actually happened (the live tab's view, run on history)."""
-    res = _wc_past_simulation(year, n_sims, ability_w, model_label)
+    res = _wc_past_simulation(year, n_sims, ability_w, model_label, host_adv)
     if res is None:
         st.info("Couldn't reconstruct that edition's groups from the fixtures.")
         return
+    if host_adv > 0 and year in wc_backtest.WC_HOSTS:
+        hosts = ", ".join(wc_backtest.WC_HOSTS[year])
+        st.caption(f"🏟️ Host bump +{host_adv:.0f} Elo applied to: {hosts}.")
     if ability_w > 0:
         from ..data import squad_value
         if year in squad_value.WC_FIFA_VERSION:
@@ -637,11 +658,26 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
             ".csv). It LEAKS (uses in-tournament selections), so it's an upper-bound "
             "diagnostic for comparison, NOT a valid out-of-sample score.",
         )
+    host_on = st.toggle(
+        "Host advantage in the bracket sim (backtested, Elo only)", value=False,
+        key="wc_bt_host",
+        help="Give each edition's host(s) a home bump in the all-neutral bracket "
+        "simulation. (The match-level score above already honours host advantage "
+        "via the data's neutral_site flag, so this affects only the bracket sim and "
+        "the single-edition probabilities.) Backtested leakage-free on host games "
+        "1998-2022: helps 5/7 editions (2014 Brazil & 2022 Qatar are "
+        "counterexamples), pooled-optimal ~100 Elo.",
+    )
+    host_adv = 0.0
+    if host_on and model_label == "Elo":
+        host_adv = float(st.slider(
+            "↳ host home bump (Elo pts)", 0, 120,
+            int(wc_backtest.DEFAULT_HOST_ADVANTAGE), step=5, key="wc_bt_host_adv"))
     if model_label != "Elo":
         st.caption(
             "⚠️ Dixon-Coles is a club model run on neutral-venue international data — "
             "expect weak/erratic numbers (it's here to show why Elo is the engine for "
-            "national teams), and it's slow (~30s/fit). Ability overlay is Elo-only."
+            "national teams), and it's slow (~30s/fit). Ability/host overlays are Elo-only."
         )
     if st.button("Run World Cup backtest", type="primary", key="wc_bt_run"):
         try:
@@ -704,7 +740,7 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
                             use_container_width=True,
                         )
                     if run_tourney:
-                        res = _wc_tournament_backtest(edition, n_sims, model_label)
+                        res = _wc_tournament_backtest(edition, n_sims, model_label, host_adv)
                         eds = res.get("editions")
                         if eds is None or len(eds) == 0:
                             st.info("No completed tournament to simulate for that selection.")
@@ -729,7 +765,8 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
                         "tab for its groups and live, updating win probabilities."
                     )
                 else:
-                    _render_past_wc_simulation(int(edition), n_sims, ability_w, model_label)
+                    _render_past_wc_simulation(
+                        int(edition), n_sims, ability_w, model_label, host_adv)
 
     st.divider()
 
@@ -995,25 +1032,33 @@ def _live_ability() -> tuple[dict, str]:
 
 
 @st.cache_resource(show_spinner="Fitting model on real history...")
-def _live_model(model_label: str, fingerprint: str, ability_w: float = 0.0) -> object:
+def _live_model(
+    model_label: str, fingerprint: str, ability_w: float = 0.0, host_adv: float = 0.0
+) -> object:
     del fingerprint  # cache key only; new/changed results -> new key -> refit
     factory = MODEL_FACTORIES[model_label]
-    if ability_w > 0:
-        base = factory()
-        if isinstance(base, EloGoalsModel):  # only the Elo engine takes a squad overlay
+    # Only the Elo engine takes the squad overlay / host bump; both feed the
+    # all-neutral simulation, where 2026's hosts (US/Canada/Mexico) get no edge
+    # otherwise. Backtested: host advantage helps 5/7 past WCs (see WC_HOSTS).
+    if isinstance(factory(), EloGoalsModel) and (ability_w > 0 or host_adv > 0):
+        kwargs: dict = {}
+        if ability_w > 0:
             adj, _ = _live_ability()
             if adj:
-                return EloGoalsModel(
-                    squad_strength=adj, squad_weight=ability_w
-                ).fit(_live_train().copy())
+                kwargs.update(squad_strength=adj, squad_weight=ability_w)
+        if host_adv > 0:
+            kwargs.update(hosts=wc_backtest.WC_HOSTS.get(2026, ()), host_advantage=host_adv)
+        if kwargs:
+            return EloGoalsModel(**kwargs).fit(_live_train().copy())
     return factory().fit(_live_train().copy())
 
 
 @st.cache_data(show_spinner="Simulating World Cup 2026...", ttl=900)
 def _live_wc(
-    model_label: str, n_sims: int, anchor: bool, fingerprint: str, ability_w: float = 0.0
+    model_label: str, n_sims: int, anchor: bool, fingerprint: str,
+    ability_w: float = 0.0, host_adv: float = 0.0,
 ) -> pd.DataFrame:
-    model = _live_model(model_label, fingerprint, ability_w)
+    model = _live_model(model_label, fingerprint, ability_w, host_adv)
     groups = world_cup.load_groups()
     # Lock in games already played (history + live Odds-API results + ledger).
     world_cup.build_fixtures(_live_history(), groups, extra_results=_live_scores())
@@ -1035,6 +1080,33 @@ def _live_wc(
 @st.cache_data(show_spinner="Fetching live odds...", ttl=900)
 def _live_odds(sport: str, aggregate: str) -> pd.DataFrame:
     return odds_api.fetch_match_odds(sport=sport, aggregate=aggregate)
+
+
+@st.cache_data(show_spinner="Fetching futures (winner) market...", ttl=1800)
+def _live_outrights() -> dict:
+    """De-vigged WC-winner (futures) market champion probabilities, or empty."""
+    try:
+        return odds_api.fetch_outrights()
+    except Exception:
+        return {}
+
+
+def _blend_champion_to_market(sims: pd.DataFrame, market: dict, weight: float = 0.5):
+    """Blend the sim's champion_probability toward the futures market, renormalised.
+
+    champ_final = (1-w)*sim + w*market for teams the market prices; teams it does
+    not price keep their sim value. The column is then renormalised to sum to 1.
+    """
+    if not market or "champion_probability" not in sims.columns:
+        return sims
+    out = sims.copy()
+    blended = []
+    for team, sim_p in zip(out["team"], out["champion_probability"]):
+        mp = market.get(team)
+        blended.append((1 - weight) * sim_p + weight * mp if mp is not None else sim_p)
+    total = sum(blended)
+    out["champion_probability"] = [b / total for b in blended] if total > 0 else blended
+    return out.sort_values("champion_probability", ascending=False).reset_index(drop=True)
 
 
 def _tab_world_cup() -> None:
@@ -1071,6 +1143,23 @@ def _tab_world_cup() -> None:
         "anchor already prices ability); uncovered nations fall back to pure Elo; "
         "Elo model only.",
     )
+    futures_anchor = st.toggle(
+        "Anchor champion odds to the futures market", value=True, key="wc_futures",
+        help="Blend the simulated CHAMPION probabilities toward the de-vigged "
+        "bookmaker WORLD-CUP-WINNER (outright) market — the single best title "
+        "forecast available, and the market is the ceiling no model has beaten "
+        "out-of-sample here. Affects the champion column only.",
+    )
+    host_on = st.toggle(
+        "Host advantage for US / Canada / Mexico", value=True, key="wc_host",
+        help="The simulation treats every game as neutral, but the hosts play on "
+        "home soil. BACKTESTED on past World Cups (1998-2022): a host home bump "
+        "cuts host-game log loss on 5 of 7 editions (2014 Brazil and 2022 Qatar "
+        "are counterexamples). With three co-hosts across a continent the effect "
+        "is diluted vs a single host, so a moderate +40 Elo is applied (vs ~65-100 "
+        "for single hosts). Elo model only.",
+    )
+    host_adv = 40.0 if host_on else 0.0  # co-host-discounted (single hosts: ~65-100)
     if c4.button("🔄 Refresh live data"):
         # Force a fresh martj42 download (bypass the disk cache) so a just-played
         # game shows even if the cached feed predates it, then drop every cached
@@ -1080,7 +1169,8 @@ def _tab_world_cup() -> None:
         except Exception:
             pass
         for fn in (_live_history, _live_scores, _live_results_store,
-                   _live_train, _live_ability, _live_model, _live_wc, _live_odds):
+                   _live_train, _live_ability, _live_model, _live_wc, _live_odds,
+                   _live_outrights):
             try:
                 fn.clear()
             except Exception:
@@ -1099,13 +1189,15 @@ def _tab_world_cup() -> None:
                 _live_history(), world_cup.load_groups(), extra_results=_live_scores()
             ).pipe(lambda d: (d["home_score"] != "").sum())
         )
-        sims = _live_wc(model_label, n_sims, anchor, fingerprint, ability_w)
+        host_adv_eff = host_adv if model_label == "Elo" else 0.0
+        sims = _live_wc(model_label, n_sims, anchor, fingerprint, ability_w, host_adv_eff)
     except Exception as exc:
         st.error(f"Live World Cup pipeline failed: {exc}")
         return
     st.caption(
         f"{played}/72 group games played and locked in (incl. live results)"
         + (" · anchored to live market odds" if anchor else " · pure model (no anchor)")
+        + (f" · +{host_adv_eff:.0f} Elo host bump (US/CAN/MEX)" if host_adv_eff else "")
     )
     if ability_on:
         _adj, _src = _live_ability()
@@ -1118,6 +1210,17 @@ def _tab_world_cup() -> None:
                 f"⚗️ Experimental ability overlay ON ({len(_adj)} teams, source: {_src}) "
                 "— not backtested; this did not beat plain Elo on past World Cups."
             )
+    if futures_anchor:
+        market_champ = _live_outrights()
+        if market_champ:
+            sims = _blend_champion_to_market(sims, market_champ, weight=0.5)
+            st.caption(
+                f"🎯 Champion probabilities blended 50/50 with the live futures "
+                f"(winner) market ({len(market_champ)} teams) — the market is the "
+                "ceiling no model has beaten OOS here."
+            )
+        else:
+            st.caption("Futures market unavailable — champion probabilities are pure model.")
     cols = st.columns(3)
     top = sims.iloc[0]
     cols[0].metric("Favourite", str(top["team"]), f"{top['champion_probability']:.1%}")

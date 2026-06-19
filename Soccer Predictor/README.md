@@ -29,6 +29,19 @@ already played, and **updates as results come in**:
 - **Market anchor (on by default).** Near-term fixtures are blended toward the
   de-vigged live betting line — the single strongest short-horizon signal — while
   future knockout matchups use the pure model.
+- **Futures anchor (on by default).** The simulated *champion* probabilities are
+  blended 50/50 with the de-vigged bookmaker **World-Cup-winner (outright) market**
+  — the single best title forecast available, and the market is the ceiling no
+  model has beaten out-of-sample here.
+- **Host advantage (on by default).** The bracket is simulated as all-neutral, but
+  the hosts (US / Canada / Mexico) play on home soil, so they get a moderate
+  +40-Elo home bump. Backtested leakage-free on past World Cups (1998–2022): a host
+  bump cuts host-game log loss on 5 of 7 editions (2014 Brazil and 2022 Qatar are
+  the counterexamples). Three co-hosts across a continent dilute the effect, so the
+  +40 is conservative vs the ~65–100 a single host warrants.
+- **Penalty shootouts.** Drawn knockouts go to extra time, then a shootout modelled
+  as near-random — the favourite's open-play edge is shrunk toward a coin flip,
+  matching the empirical near-randomness of shootouts.
 
 Run it in the browser (the **🏆 World Cup 2026 (live)** tab) or from the CLI:
 
@@ -244,6 +257,13 @@ See [docs/data_sources.md](docs/data_sources.md) for the full free-vs-paid map.
   93–100% name-joined to the ability sources) — but it **leaks** (in-tournament
   selections), so it's a labelled diagnostic/upper-bound (≈−0.008 vs −0.0076 for
   the clean rank-XI), not a valid OOS number.
+- **Host advantage (backtested, on by default in the live tab).** The match-level
+  backtest already honours host home advantage (the data flags host games
+  non-neutral), but the *bracket simulation* treats every game as neutral, so hosts
+  got nothing. Giving each edition's host a home bump cuts host-game log loss on
+  **5 of 7** past World Cups out of sample (pooled optimum ~100 Elo; 2014 Brazil
+  and 2022 Qatar are real counterexamples). The **Backtest Lab** tab has a *"Host
+  advantage in the bracket sim"* toggle + Elo-points slider to test it per edition.
 - **Live ability overlay (experimental, off by default).** The World Cup tab's
   *"Squad-ability overlay"* toggle tilts the Elo engine toward squad ability.
   FIFA `overall` + age-adjusted Transfermarkt ability (value de-aged both ways —

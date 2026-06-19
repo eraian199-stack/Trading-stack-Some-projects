@@ -42,6 +42,27 @@ from . import metrics
 
 WC_COMPETITION = "FIFA World Cup"
 
+# Tournament hosts per edition (verified facts). Used to give the host a home
+# bump in the all-neutral SIMULATION path (tournament/champion/live). NOTE: the
+# match-level backtest already honours host home advantage via the data's
+# neutral_site=False flag, so host_advantage must NOT be added there too.
+WC_HOSTS: dict[int, tuple[str, ...]] = {
+    1998: ("France",),
+    2002: ("South Korea", "Japan"),
+    2006: ("Germany",),
+    2010: ("South Africa",),
+    2014: ("Brazil",),
+    2018: ("Russia",),
+    2022: ("Qatar",),
+    2026: ("United States", "Canada", "Mexico"),
+}
+# Backtested on host games 1998-2022 (leakage-free): host advantage helps 5/7
+# editions, pooled-optimal ~100 Elo pts (basin 85-120); 2014 Brazil and 2022
+# Qatar are genuine counterexamples. Default to one home advantage (65) -- the
+# established home-field value the model already uses -- as a conservative,
+# non-overfit choice (the pooled argmin overfits the strong host runs).
+DEFAULT_HOST_ADVANTAGE = 65.0
+
 
 def identify_world_cups(history: pd.DataFrame) -> dict[int, pd.DataFrame]:
     """Map edition year -> that edition's finals matches (date-sorted)."""
