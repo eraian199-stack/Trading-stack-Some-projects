@@ -25,6 +25,9 @@ data/world_cup_2026_results.csv
 # Squad-value table: derived from the external CC0 Transfermarkt dataset,
 # rebuilt on demand by data/squad_value.py. Not a committed artifact.
 data/squad_value_by_year.csv
+# User/exported ability overlays (e.g. SofaScore ratings) for the squad overlay;
+# per-deployment snapshots, refreshed by re-export. Not committed.
+data/ability_overlay_*.csv
 
 # Original uploaded reference framework (inputs that were merged into the stack)
 docs/files/
