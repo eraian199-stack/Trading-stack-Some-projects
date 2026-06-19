@@ -417,9 +417,44 @@ def _wc_tournament_backtest(edition: str, n_sims: int) -> dict:
     )
 
 
+@st.cache_data(show_spinner="Loading FIFA squad-ability ratings...", ttl=3600)
+def _wc_fifa_ability() -> dict:
+    """{year: Elo-point adjustments} from FIFA squad ability, for the overlay."""
+    from ..data import players, squad_value
+    byyear = squad_value.build_fifa_ability_by_year(list(squad_value.WC_FIFA_VERSION))
+    return {y: players.to_elo_adjustment(byyear[y], spread=60.0, log=False)
+            for y in byyear}
+
+
+@st.cache_data(show_spinner="Backtesting FIFA ability vs Elo...", ttl=3600)
+def _wc_ability_leaderboard() -> pd.DataFrame:
+    """Match-level OOS: plain Elo vs Elo+FIFA-ability on the clean editions."""
+    from ..data import squad_value
+    adj = _wc_fifa_ability()
+    clean = [y for y in squad_value.WC_FIFA_VERSION if y not in squad_value.FIFA_LEAKAGE_EDITIONS]
+    facs = {
+        "elo": EloGoalsModel,
+        "elo+FIFAability@0.5": lambda year: EloGoalsModel(
+            squad_strength=adj.get(year), squad_weight=0.5),
+        "elo+FIFAability@1.0": lambda year: EloGoalsModel(
+            squad_strength=adj.get(year), squad_weight=1.0),
+    }
+    return wc_backtest.compare_models_on_world_cups(
+        _live_history(), facs, years=clean, min_year=min(clean)
+    )
+
+
 @st.cache_data(show_spinner="Simulating that World Cup...", ttl=3600)
-def _wc_past_simulation(year: int, n_sims: int) -> dict | None:
-    """Groups + full per-team win/advancement probabilities for one past edition."""
+def _wc_past_simulation(year: int, n_sims: int, ability_w: float = 0.0) -> dict | None:
+    """Groups + full per-team win/advancement probabilities for one past edition,
+    optionally tilted toward FIFA squad ability."""
+    if ability_w > 0:
+        adj = _wc_fifa_ability()
+        if year in adj:
+            fac = lambda yr: EloGoalsModel(  # noqa: E731
+                squad_strength=adj.get(yr), squad_weight=ability_w)
+            return wc_backtest.simulate_past_world_cup(
+                _live_history(), fac, year, n_simulations=n_sims)
     return wc_backtest.simulate_past_world_cup(
         _live_history(), EloGoalsModel, year, n_simulations=n_sims
     )
@@ -441,13 +476,20 @@ def _actual_finish(team: str, reached: dict | None) -> str:
     return "Group stage"
 
 
-def _render_past_wc_simulation(year: int, n_sims: int) -> None:
+def _render_past_wc_simulation(year: int, n_sims: int, ability_w: float = 0.0) -> None:
     """Groups + pre-tournament win/advancement probabilities for one past edition,
     shown next to what actually happened (the live tab's view, run on history)."""
-    res = _wc_past_simulation(year, n_sims)
+    res = _wc_past_simulation(year, n_sims, ability_w)
     if res is None:
         st.info("Couldn't reconstruct that edition's groups from the fixtures.")
         return
+    if ability_w > 0:
+        from ..data import squad_value
+        if year in squad_value.WC_FIFA_VERSION:
+            leak = " (FIFA 15 post-dates the 2014 WC — leakage)" if year in squad_value.FIFA_LEAKAGE_EDITIONS else ""
+            st.caption(f"⚗️ FIFA squad-ability overlay ON (weight {ability_w}){leak}.")
+        else:
+            st.info(f"No FIFA ability ratings for {year} (mirror covers 2018+); showing plain Elo.")
     groups, sims, reached = res["groups"], res["sims"], res["reached"]
     if res["champion"]:
         fav = sims.iloc[0]
@@ -502,6 +544,16 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
         "reality.",
     )
     n_sims = int(e3.slider("Sim runs", 1000, 8000, 3000, step=1000, key="wc_bt_sims"))
+    ability_on = st.toggle(
+        "Test the FIFA squad-ability overlay (experimental)", value=False,
+        key="wc_bt_ability",
+        help="Real EA-FC/FIFA squad ability (overall ratings, global coverage) as a "
+        "pre-tournament overlay. Adds a plain-Elo vs Elo+ability head-to-head on the "
+        "clean editions (2018 & 2022) and tilts the single-edition probabilities. "
+        "Backtest shows a SMALL improvement over Elo, but only 2 clean editions "
+        "exist (underpowered) — exploratory.",
+    )
+    ability_w = 0.5 if ability_on else 0.0
     if st.button("Run World Cup backtest", type="primary", key="wc_bt_run"):
         try:
             ml = _wc_matchlevel_backtest(edition)
@@ -529,6 +581,24 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
                     f"{floor['log_loss'] - p['log_loss']:+.4f} log loss over "
                     f"{ml['n']} matches — that gap is the skill."
                 )
+                if ability_on:
+                    try:
+                        lb = _wc_ability_leaderboard()
+                        st.markdown(
+                            "**FIFA squad-ability vs plain Elo** — match-level OOS on the "
+                            "clean editions (2018 & 2022), lower log loss = better"
+                        )
+                        st.dataframe(lb.round(4), use_container_width=True)
+                        if "elo" in lb.index:
+                            d = float(lb["log_loss"].min() - lb.loc["elo", "log_loss"])
+                            st.caption(
+                                f"Best ability variant vs plain Elo: {d:+.4f} log loss "
+                                f"({'helps' if d < 0 else 'no improvement'}). Only TWO "
+                                "clean editions exist (FIFA starts at 15; 2014 would be "
+                                "post-WC leakage) — underpowered, treat as exploratory."
+                            )
+                    except Exception as exc:
+                        st.warning(f"FIFA ability comparison unavailable: {exc}")
                 if edition == "All since 1998":
                     if not ml["per_edition"].empty:
                         st.caption("Per edition")
@@ -564,7 +634,7 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
                         "tab for its groups and live, updating win probabilities."
                     )
                 else:
-                    _render_past_wc_simulation(int(edition), n_sims)
+                    _render_past_wc_simulation(int(edition), n_sims, ability_w)
 
     st.divider()
 
@@ -801,10 +871,10 @@ def _live_ability() -> tuple[dict, str]:
             raw = squad_value.load_ability_csv(str(csv))
             src = f"your ability_overlay_2026.csv ({len(raw)} teams)"
         else:
-            df = squad_value.build_current_ability()
+            df = squad_value.build_fifa_current_ability()  # real ability, global coverage
             raw = dict(zip(df["team"], df["ability"]))
-            yr = int(df["source_year"].iloc[0]) if len(df) else "?"
-            src = f"age-adjusted Transfermarkt value ({yr} snapshot, de-aged)"
+            ver = int(df["source_year"].iloc[0]) if len(df) else "?"
+            src = f"EA-FC/FIFA {ver} squad ability (overall ratings)"
     except Exception as exc:
         return {}, f"unavailable ({exc})"
     if not raw:

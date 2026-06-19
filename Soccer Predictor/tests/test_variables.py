@@ -209,6 +209,26 @@ def test_load_ability_csv_per_team_and_per_player(tmp_path):
     assert abs(out2["France"] - 7.5) < 1e-9 and abs(out2["Brazil"] - 9.0) < 1e-9
 
 
+def test_fifa_ability_snapshot_pre_wc_and_aggregate(monkeypatch):
+    """FIFA ability uses the rating snapshot on/before kickoff (no leakage) and
+    aggregates each nation's top-K overall."""
+    from soccer_predictor.data import squad_value as sv
+
+    rows = [
+        {"fifa_version": 18, "fifa_update_date": "2017-09-01", "short_name": "A",
+         "overall": 90, "age": 27, "nationality_name": "Testland"},
+        {"fifa_version": 18, "fifa_update_date": "2017-09-01", "short_name": "B",
+         "overall": 80, "age": 27, "nationality_name": "Testland"},
+        {"fifa_version": 18, "fifa_update_date": "2019-01-01", "short_name": "A",
+         "overall": 99, "age": 29, "nationality_name": "Testland"},  # post-WC -> ignore
+    ] + [{"fifa_version": 18, "fifa_update_date": "2017-09-01", "short_name": f"P{i}",
+          "overall": 50, "age": 25, "nationality_name": "Testland"} for i in range(15)]
+    monkeypatch.setattr(sv, "fetch_fifa_players", lambda: pd.DataFrame(rows))
+    a = sv.build_fifa_ability(2018, top_k=2, min_covered=2)
+    row = a[a["team"] == "Testland"].iloc[0]
+    assert abs(row["ability"] - 85.0) < 1e-9  # top-2 of the 2017-09 snapshot = (90+80)/2
+
+
 def test_build_current_ability_deages_veterans(monkeypatch):
     """The live ability overlay de-ages value so a 34-yo squad is rated on ability
     (value / age-retention), not its age-discounted price."""

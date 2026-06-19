@@ -224,23 +224,24 @@ See [docs/data_sources.md](docs/data_sources.md) for the full free-vs-paid map.
   not reproduce the exact published mapping for all cases). Such assumptions are
   carried on `TournamentFormat.notes` and labelled approximate. Group tie-breakers
   approximate the full FIFA drawing-of-lots procedure.
-- **Squad strength was backtested and does not help.** Using point-in-time
-  Transfermarkt squad value (CC0 dataset, joined as-of each kickoff for WCs
-  2014/2018/2022), an Elo+squad overlay does **not** beat plain Elo out of sample
-  — a tiny weight is within noise and any real weight hurts (it doesn't even lift
-  France 2018's pre-tournament rank above #5). Reproduce with
-  `backtest-world-cups --squad`. So squad value stays OFF, like the other
-  overlays. Player *ability* ratings (FotMob/WhoScored) are a cleaner signal but
-  only exist ~2017+ (two WCs — no backtest power) and the live model already
-  anchors to the market, which prices ability. The overlay is still available for
-  live experimentation: a **"Squad-ability overlay (experimental)"** toggle in the
-  World Cup tab (off by default) tilts the Elo engine toward age-adjusted squad
-  ability. It is **source-agnostic** — the rating-site APIs (SofaScore, FotMob,
-  WhoScored) are Cloudflare/signed-header gated to scripts (they work in a
-  browser), so export any reputable site's ratings to
-  `data/ability_overlay_2026.csv` (a team + rating column, per-team **or**
-  per-player — auto-aggregated, any scale) and the overlay uses them. Clearly
-  labelled not-backtested; under-covered nations fall back to pure Elo.
+- **Squad strength, backtested two ways.** (1) Point-in-time Transfermarkt squad
+  *value* (CC0 dataset) does **not** beat Elo out of sample — within noise at best
+  (`backtest-world-cups --squad`). (2) Real squad *ability* — EA-FC/FIFA `overall`
+  ratings (the public `jsulz/FIFA23` mirror; global coverage, by edition) — shows
+  a **small** out-of-sample improvement over Elo on the clean editions (2018 &
+  2022: ~−0.007 log loss at a modest weight), but only **two** clean editions
+  exist (FIFA starts at 15; 2014 would be post-WC leakage), so it is underpowered
+  and stays **off by default**. Test it yourself: the **Backtest Lab** tab has a
+  *"Test the FIFA squad-ability overlay"* toggle (plain-Elo vs Elo+ability
+  head-to-head, and it tilts the single-edition probabilities).
+- **Live ability overlay (experimental, off by default).** The World Cup tab's
+  *"Squad-ability overlay"* toggle tilts the Elo engine toward squad ability —
+  EA-FC/FIFA ratings by default, or **any reputable site** you export to
+  `data/ability_overlay_2026.csv` (SofaScore/FotMob/WhoScored APIs are
+  Cloudflare/signed-header gated to scripts, so export from the browser; per-team
+  **or** per-player, auto-aggregated, any scale). Labelled not-backtested;
+  under-covered nations fall back to pure Elo; the live model already anchors to
+  the market, which prices ability anyway.
 - A model is only as fresh as its data; without xG / lineups / injuries / odds it
   cannot see them.
 - **Positive betting ROI is a hypothesis, not proof.** Beating the *closing* line

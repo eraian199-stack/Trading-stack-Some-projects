@@ -184,6 +184,99 @@ def build_squad_value(
     return df.reset_index(drop=True)
 
 
+# --------------------------------------------------------------------------- #
+# EA FC / FIFA player ABILITY ratings (real ability, not value), historical.
+# Source: the public jsulz/FIFA23 mirror on Hugging Face (no auth) of the
+# stefanoleone992 SoFIFA export -- FIFA 15..23 with overall + nationality + a
+# dated update snapshot, so a squad's ability AS OF a past World Cup is a lookup.
+# The live rating-site APIs (SofaScore/FotMob/WhoScored) are Cloudflare/signed-
+# header gated to scripts, so this open mirror is how we "get the data".
+# --------------------------------------------------------------------------- #
+import io
+import urllib.parse
+
+_FIFA_URL = (
+    "https://huggingface.co/datasets/jsulz/FIFA23/resolve/main/"
+    + urllib.parse.quote("male_players (legacy).csv")
+)
+# WC edition -> the FIFA edition whose ratings are current at that tournament.
+# 2014 has no pre-WC FIFA edition in the mirror (FIFA 15 launched Sept 2014, after
+# the June WC), so it is flagged as leakage-affected and excluded from the clean
+# backtest; 2018/2022 use the pre-tournament FIFA 18 / FIFA 23 launch rosters.
+WC_FIFA_VERSION: dict[int, int] = {2014: 15, 2018: 18, 2022: 23}
+FIFA_LEAKAGE_EDITIONS = {2014}  # rating snapshot post-dates the tournament
+
+
+def fetch_fifa_players() -> pd.DataFrame:
+    """FIFA 15..23 player ratings (overall, nationality, dated update) from HF."""
+    raw = _cached_bytes(_FIFA_URL, "fifa_male_players_legacy.csv", ttl_days=90.0)
+    return pd.read_csv(
+        io.BytesIO(raw),
+        usecols=["fifa_version", "fifa_update_date", "short_name", "overall",
+                 "age", "nationality_name"],
+        low_memory=False,
+    )
+
+
+def _fifa_snapshot(df: pd.DataFrame, version: int, as_of: pd.Timestamp) -> pd.DataFrame:
+    """The single rating update for ``version`` closest to (and at/ before) as_of."""
+    sub = df[df["fifa_version"] == version].copy()
+    if sub.empty:
+        return sub
+    sub["_d"] = pd.to_datetime(sub["fifa_update_date"], errors="coerce")
+    pre = sub[sub["_d"] <= as_of]
+    chosen = pre["_d"].max() if len(pre) else sub["_d"].min()  # min() only for leaky 2014
+    return sub[sub["_d"] == chosen]
+
+
+def _aggregate_ability(snap: pd.DataFrame, top_k: int, min_covered: int) -> pd.DataFrame:
+    rows = []
+    snap = snap.dropna(subset=["overall", "nationality_name"])
+    for nat, grp in snap.groupby("nationality_name"):
+        vals = sorted((float(v) for v in grp["overall"]), reverse=True)
+        if len(vals) < min_covered:
+            continue
+        core = vals[:top_k]
+        rows.append({"team": normalize_team_name(str(nat)),
+                     "ability": float(sum(core) / len(core)), "n_covered": len(vals)})
+    return pd.DataFrame(rows).sort_values("ability", ascending=False).reset_index(drop=True)
+
+
+def build_fifa_ability(
+    year: int, *, top_k: int = 20, min_covered: int = 15
+) -> pd.DataFrame:
+    """Per-nation FIFA squad ABILITY (top-K overall) as of ``year``'s World Cup."""
+    if year not in WC_FIFA_VERSION:
+        raise ValueError(f"no FIFA edition mapped for {year}")
+    as_of = pd.Timestamp(WC_ASOF.get(year, f"{year}-06-15"))
+    snap = _fifa_snapshot(fetch_fifa_players(), WC_FIFA_VERSION[year], as_of)
+    return _aggregate_ability(snap, top_k, min_covered)
+
+
+def build_fifa_ability_by_year(
+    years: list[int] | None = None, *, top_k: int = 20, min_covered: int = 15,
+) -> dict[int, dict[str, float]]:
+    """{year: {team: ability}} for the FIFA-backtestable editions (clean: 2018/2022)."""
+    years = years or [y for y in sorted(WC_FIFA_VERSION) if y not in FIFA_LEAKAGE_EDITIONS]
+    out: dict[int, dict[str, float]] = {}
+    for y in years:
+        df = build_fifa_ability(y, top_k=top_k, min_covered=min_covered)
+        out[y] = dict(zip(df["team"], df["ability"]))
+    return out
+
+
+def build_fifa_current_ability(*, top_k: int = 20, min_covered: int = 15) -> pd.DataFrame:
+    """Latest available FIFA edition's squad ability (for the LIVE 2026 overlay)."""
+    df = fetch_fifa_players()
+    version = int(pd.to_numeric(df["fifa_version"], errors="coerce").max())
+    sub = df[df["fifa_version"] == version].copy()
+    sub["_d"] = pd.to_datetime(sub["fifa_update_date"], errors="coerce")
+    snap = sub[sub["_d"] == sub["_d"].max()]
+    out = _aggregate_ability(snap, top_k, min_covered)
+    out["source_year"] = version
+    return out
+
+
 def _latest_year_with_values(listing: dict[str, str]) -> int:
     """Most recent edition whose ``players.json.gz`` still carries value histories.
 
