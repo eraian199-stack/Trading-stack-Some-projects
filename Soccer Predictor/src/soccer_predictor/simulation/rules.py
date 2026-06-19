@@ -241,6 +241,11 @@ class KnockoutTie:
     extra_time: bool = True
     penalties: bool = True
     et_fraction: float = 1.0 / 3.0  # 30 ET minutes ~ 1/3 of a 90-minute rate
+    # A penalty shootout is empirically close to a coin flip -- the favourite's
+    # open-play edge barely carries over. `shootout_skill` is the FRACTION of that
+    # edge retained: 0.0 = pure 50/50, 1.0 = full open-play win prob (unrealistic).
+    # Default 0.25 keeps a slight favourite tilt while reflecting the near-randomness.
+    shootout_skill: float = 0.25
 
 
 # --------------------------------------------------------------------------- #

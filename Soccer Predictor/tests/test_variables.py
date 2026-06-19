@@ -225,6 +225,31 @@ def test_combine_ability_blends_only_where_present():
     assert abs(out2["A"] - out["A"]) < 1e-9
 
 
+def test_penalty_shootout_shrinks_toward_coin_flip():
+    """A penalty shootout is near-random: the favourite's open-play edge is shrunk
+    toward 0.5 by shootout_skill (0 = pure coin flip, 1 = full edge)."""
+    from soccer_predictor.simulation.match import simulate_match
+    from soccer_predictor.simulation import rules
+
+    class _Stub:  # always 0-0 in regulation + ET, strong open-play favourite
+        def sample_score(self, h, a, rng, ctx):
+            return (0, 0)
+        def expected_goals(self, h, a, ctx):
+            return (0.0, 0.0)
+        def win_probability_no_draw(self, h, a, ctx):
+            return 0.8
+
+    rng = np.random.default_rng(0)
+    def fav_rate(skill, n=4000):
+        tie = rules.KnockoutTie(extra_time=False, penalties=True, shootout_skill=skill)
+        wins = sum(simulate_match(_Stub(), "Fav", "Dog", rng, knockout=True,
+                                  tie=tie).winner == "Fav" for _ in range(n))
+        return wins / n
+    assert abs(fav_rate(0.0) - 0.5) < 0.04        # pure coin flip
+    assert abs(fav_rate(1.0) - 0.8) < 0.04        # full open-play edge
+    assert 0.53 < fav_rate(0.25) < 0.62           # default ~0.575: slight tilt only
+
+
 def test_wc_start_weights_counts_starts_and_subs(monkeypatch):
     """Actual-tournament-XI weighting counts starts (1.0) + sub appearances (0.3)
     per player across the edition, keyed by (family, given-initial)."""

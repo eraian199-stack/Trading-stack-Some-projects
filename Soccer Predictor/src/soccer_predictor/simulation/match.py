@@ -4,7 +4,7 @@ Single-match simulation.
 `simulate_match` draws one fixture from a `ScorelineModel`. League and group
 games stop after 90 minutes; knockout games that finish level go to extra time
 (extra Poisson goals scaled to a 30-minute period) and, if still level, a
-penalty shootout resolved by the model's draw-free win probability.
+near-random penalty shootout (open-play edge shrunk toward 50/50).
 
 The engine touches the model ONLY through its public scoreline interface
 (`sample_score`, `expected_goals`, `win_probability_no_draw`) -- it never
@@ -68,9 +68,11 @@ def simulate_match(
     game that is level after 90', if `tie.extra_time` is set we add a Poisson
     draw per side with rate `expected_goals * tie.et_fraction` (30 ET minutes are
     roughly a third of a 90-minute scoring rate). If it is still level and
-    `tie.penalties` is set, the winner is decided by
-    `model.win_probability_no_draw` -- the penalty shootout is a coin-flip biased
-    by the two sides' relative strength, but the recorded scoreline is unchanged.
+    `tie.penalties` is set, the winner is decided by a PENALTY SHOOTOUT modelled
+    as near-random: the open-play win probability is shrunk toward 0.5 by
+    `tie.shootout_skill` (default 0.25, so a strong favourite wins a shootout only
+    a little above 50%, matching the empirical near-coin-flip). The recorded
+    scoreline is unchanged.
     """
     tie = tie if tie is not None else rules.KnockoutTie()
     ctx = dict(context) if context is not None else {}
@@ -91,7 +93,10 @@ def simulate_match(
         if home_score == away_score:
             if tie.penalties:
                 penalties = True
-                p_home = model.win_probability_no_draw(home, away, ctx)
+                # Shootouts are ~coin-flips: shrink the open-play edge toward 0.5
+                # by `tie.shootout_skill` (0 = pure 50/50, 1 = full win prob).
+                p_raw = model.win_probability_no_draw(home, away, ctx)
+                p_home = 0.5 + tie.shootout_skill * (p_raw - 0.5)
                 winner = home if rng.random() < p_home else away
             else:
                 # No resolution configured: fall back to a fair coin so a
