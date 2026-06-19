@@ -235,8 +235,12 @@ See [docs/data_sources.md](docs/data_sources.md) for the full free-vs-paid map.
   anchors to the market, which prices ability. The overlay is still available for
   live experimentation: a **"Squad-ability overlay (experimental)"** toggle in the
   World Cup tab (off by default) tilts the Elo engine toward age-adjusted squad
-  ability — or your own `data/ability_overlay_2026.csv` (e.g. FotMob ratings) —
-  clearly labelled not-backtested, with under-covered nations falling back to Elo.
+  ability. It is **source-agnostic** — the rating-site APIs (SofaScore, FotMob,
+  WhoScored) are Cloudflare/signed-header gated to scripts (they work in a
+  browser), so export any reputable site's ratings to
+  `data/ability_overlay_2026.csv` (a team + rating column, per-team **or**
+  per-player — auto-aggregated, any scale) and the overlay uses them. Clearly
+  labelled not-backtested; under-covered nations fall back to pure Elo.
 - A model is only as fresh as its data; without xG / lineups / injuries / odds it
   cannot see them.
 - **Positive betting ROI is a hypothesis, not proof.** Beating the *closing* line

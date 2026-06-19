@@ -796,8 +796,10 @@ def _live_ability() -> tuple[dict, str]:
     csv = Path("data/ability_overlay_2026.csv")
     try:
         if csv.exists():
-            raw = players.load_squad_strength_csv(str(csv))
-            src = "your ability_overlay_2026.csv"
+            # Any reputable site's export (SofaScore/FotMob/WhoScored/...), per-team
+            # or per-player; aggregated + scale-detected below.
+            raw = squad_value.load_ability_csv(str(csv))
+            src = f"your ability_overlay_2026.csv ({len(raw)} teams)"
         else:
             df = squad_value.build_current_ability()
             raw = dict(zip(df["team"], df["ability"]))
@@ -805,8 +807,11 @@ def _live_ability() -> tuple[dict, str]:
             src = f"age-adjusted Transfermarkt value ({yr} snapshot, de-aged)"
     except Exception as exc:
         return {}, f"unavailable ({exc})"
-    adj = players.to_elo_adjustment(raw, spread=60.0, log=True) if raw else {}
-    return adj, src
+    if not raw:
+        return {}, "no usable rows in the overlay source"
+    # Heavy-tailed money (€, millions) wants a log; bounded ratings (0-10) do not.
+    use_log = max(raw.values()) > 1000.0
+    return players.to_elo_adjustment(raw, spread=60.0, log=use_log), src
 
 
 @st.cache_resource(show_spinner="Fitting model on real history...")
@@ -872,11 +877,14 @@ def _tab_world_cup() -> None:
     ability_on = st.toggle(
         "Squad-ability overlay (experimental, NOT backtested)", value=False,
         key="wc_ability",
-        help="Tilt the Elo engine toward squad ABILITY (age-adjusted Transfermarkt "
-        "value, or your own data/ability_overlay_2026.csv). Backtested on past WCs "
-        "this did NOT beat plain Elo, and the market anchor already prices ability "
-        "— so it is off by default and only for exploring. Under-covered nations "
-        "fall back to pure Elo. Only affects the Elo model.",
+        help="Tilt the Elo engine toward squad ABILITY. Source: age-adjusted "
+        "Transfermarkt value by default, OR drop any reputable rating site's export "
+        "(SofaScore / FotMob / WhoScored — their APIs are browser-gated, so export "
+        "to CSV) into data/ability_overlay_2026.csv (a team+rating column, per-team "
+        "or per-player; auto-aggregated, any scale). Backtested on past WCs this did "
+        "NOT beat plain Elo and the market anchor already prices ability, so it is "
+        "off by default and exploratory. Under-covered nations fall back to pure "
+        "Elo; only affects the Elo model.",
     )
     if c4.button("🔄 Refresh live data"):
         # Force a fresh martj42 download (bypass the disk cache) so a just-played

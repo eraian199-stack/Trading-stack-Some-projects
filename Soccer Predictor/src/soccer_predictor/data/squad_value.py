@@ -277,6 +277,54 @@ def build_squad_value_by_year(
     return table
 
 
+def load_ability_csv(
+    path: str | Path, *, top_k: int = 20, min_covered: int = 1
+) -> dict[str, float]:
+    """Load ANY reputable rating site's export into a {team: strength} overlay.
+
+    Source-agnostic by design (the rating-site APIs -- SofaScore, FotMob detail,
+    WhoScored -- are Cloudflare/signed-header gated to scripts, so the reliable
+    bridge is a CSV you export from the browser). Accepts either shape:
+      * PER-TEAM: one row per national team (a ``team`` column + a numeric rating).
+      * PER-PLAYER: many rows (a ``team`` column + a per-player ``rating`` column);
+        rows are aggregated to the team's top-``top_k`` mean, with a coverage gate.
+    Column names are detected loosely (team/nation/country; rating/ability/
+    strength/value/score/overall, else the first numeric column). Scale doesn't
+    matter -- it is z-scored downstream by :func:`players.to_elo_adjustment`.
+    """
+    df = pd.read_csv(path)
+    if df.empty:
+        return {}
+    lc = {str(c).strip().lower(): c for c in df.columns}
+    team_col = next((lc[k] for k in ("team", "nation", "country", "national_team",
+                                     "squad") if k in lc), None)
+    rating_col = next((lc[k] for k in ("rating", "ability", "strength", "value",
+                                       "score", "overall", "mean_rating") if k in lc),
+                      None)
+    if team_col is None:
+        return {}
+    if rating_col is None:  # fall back to the first numeric column that isn't the team
+        for c in df.columns:
+            if c == team_col:
+                continue
+            if pd.to_numeric(df[c], errors="coerce").notna().any():
+                rating_col = c
+                break
+    if rating_col is None:
+        return {}
+    teams = df[team_col].map(normalize_team_name)
+    ratings = pd.to_numeric(df[rating_col], errors="coerce")
+    ok = teams.ne("") & ratings.notna()
+    out: dict[str, float] = {}
+    for team, grp in ratings[ok].groupby(teams[ok]):
+        vals = sorted((float(v) for v in grp), reverse=True)
+        if len(vals) < min_covered:
+            continue
+        core = vals[:top_k]
+        out[str(team)] = float(sum(core) / len(core))
+    return out
+
+
 def load_squad_value_by_year(path: Path = SQUAD_VALUE_CSV) -> dict[int, dict[str, float]]:
     """Read the persisted table into ``{year: {team: squad_value_eur}}``."""
     if not Path(path).exists():

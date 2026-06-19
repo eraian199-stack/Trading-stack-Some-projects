@@ -191,6 +191,24 @@ def test_squad_value_asof_cutoff_and_coverage_gate(monkeypatch):
     assert abs(row["squad_value_eur"] - 15_500_000) < 1.0
 
 
+def test_load_ability_csv_per_team_and_per_player(tmp_path):
+    """The overlay accepts any rating site's export: a per-team CSV as-is, and a
+    per-player CSV aggregated to the team's top-K mean (loose column detection)."""
+    from soccer_predictor.data import squad_value as sv
+
+    per_team = tmp_path / "team.csv"
+    per_team.write_text("team,rating\nFrance,7.4\nBrazil,7.1\n")
+    out = sv.load_ability_csv(str(per_team))
+    assert abs(out["France"] - 7.4) < 1e-9 and abs(out["Brazil"] - 7.1) < 1e-9
+
+    per_player = tmp_path / "players.csv"  # SofaScore-style: many rows per nation
+    per_player.write_text(
+        "player,team,rating\nA,France,8.0\nB,France,7.0\nC,France,6.0\nD,Brazil,9.0\n"
+    )
+    out2 = sv.load_ability_csv(str(per_player), top_k=2)  # France top-2 mean = 7.5
+    assert abs(out2["France"] - 7.5) < 1e-9 and abs(out2["Brazil"] - 9.0) < 1e-9
+
+
 def test_build_current_ability_deages_veterans(monkeypatch):
     """The live ability overlay de-ages value so a 34-yo squad is rated on ability
     (value / age-retention), not its age-discounted price."""
