@@ -454,19 +454,48 @@ def _wc_fifa_ability() -> dict:
     return out
 
 
-@st.cache_data(show_spinner="Backtesting FIFA ability vs Elo...", ttl=3600)
-def _wc_ability_leaderboard() -> pd.DataFrame:
-    """Match-level OOS: plain Elo vs Elo+FIFA-ability on the clean editions."""
+@st.cache_data(show_spinner="Loading actual tournament starters...", ttl=3600)
+def _wc_actual_xi_ability() -> dict:
+    """{year: Elo-point adjustments} weighting each squad by who ACTUALLY started
+    that World Cup (jfjelstul line-ups; strength from FIFA + age-adjusted TM + any
+    per-player data/ability_overlay_<year>.csv). LEAKY -- diagnostic only."""
+    from ..data import players, squad_value
+    out = {}
+    for y in squad_value.WC_FIFA_VERSION:
+        if y in squad_value.FIFA_LEAKAGE_EDITIONS:
+            continue
+        try:
+            df = squad_value.build_actual_xi_ability(
+                y, csv_path=f"data/ability_overlay_{y}.csv")
+            if len(df):
+                out[y] = players.to_elo_adjustment(
+                    dict(zip(df["team"], df["ability"])), spread=60.0, log=False)
+        except Exception:
+            continue
+    return out
+
+
+@st.cache_data(show_spinner="Backtesting squad ability vs Elo...", ttl=3600)
+def _wc_ability_leaderboard(include_actual_xi: bool = False) -> pd.DataFrame:
+    """Match-level OOS: plain Elo vs Elo+ability on the clean editions. The
+    rating-rank XI is leakage-free; the optional actual-tournament-XI variant
+    (starred) is a leaky diagnostic."""
     from ..data import squad_value
     adj = _wc_fifa_ability()
     clean = [y for y in squad_value.WC_FIFA_VERSION if y not in squad_value.FIFA_LEAKAGE_EDITIONS]
     facs = {
         "elo": EloGoalsModel,
-        "elo+FIFAability@0.5": lambda year: EloGoalsModel(
+        "elo+ability(rank-XI)@0.5": lambda year: EloGoalsModel(
             squad_strength=adj.get(year), squad_weight=0.5),
-        "elo+FIFAability@1.0": lambda year: EloGoalsModel(
+        "elo+ability(rank-XI)@1.0": lambda year: EloGoalsModel(
             squad_strength=adj.get(year), squad_weight=1.0),
     }
+    if include_actual_xi:
+        axi = _wc_actual_xi_ability()
+        facs["elo+ability(actual-XI)@0.5 *leaky"] = lambda year: EloGoalsModel(
+            squad_strength=axi.get(year), squad_weight=0.5)
+        facs["elo+ability(actual-XI)@1.0 *leaky"] = lambda year: EloGoalsModel(
+            squad_strength=axi.get(year), squad_weight=1.0)
     return wc_backtest.compare_models_on_world_cups(
         _live_history(), facs, years=clean, min_year=min(clean)
     )
@@ -597,6 +626,17 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
         "(underpowered) — exploratory. Applies to Elo only.",
     )
     ability_w = 0.5 if (ability_on and model_label == "Elo") else 0.0
+    compare_axi = False
+    if ability_on and model_label == "Elo":
+        compare_axi = st.checkbox(
+            "↳ also compare ACTUAL tournament starters (leaky diagnostic)",
+            value=False, key="wc_bt_axi",
+            help="Adds an Elo+ability variant weighting each squad by who actually "
+            "started/subbed that World Cup (jfjelstul line-ups; strength from FIFA + "
+            "age-adjusted Transfermarkt + any per-player data/ability_overlay_<year>"
+            ".csv). It LEAKS (uses in-tournament selections), so it's an upper-bound "
+            "diagnostic for comparison, NOT a valid out-of-sample score.",
+        )
     if model_label != "Elo":
         st.caption(
             "⚠️ Dixon-Coles is a club model run on neutral-venue international data — "
@@ -632,22 +672,28 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
                 )
                 if ability_on and model_label == "Elo":
                     try:
-                        lb = _wc_ability_leaderboard()
+                        lb = _wc_ability_leaderboard(compare_axi)
                         st.markdown(
-                            "**FIFA squad-ability vs plain Elo** — match-level OOS on the "
+                            "**Squad-ability vs plain Elo** — match-level OOS on the "
                             "clean editions (2018 & 2022), lower log loss = better"
+                            + (" · `*leaky` rows weight the ACTUAL tournament XI"
+                               if compare_axi else "")
                         )
                         st.dataframe(lb.round(4), use_container_width=True)
                         if "elo" in lb.index:
                             d = float(lb["log_loss"].min() - lb.loc["elo", "log_loss"])
                             st.caption(
-                                f"Best ability variant vs plain Elo: {d:+.4f} log loss "
+                                f"Best variant vs plain Elo: {d:+.4f} log loss "
                                 f"({'helps' if d < 0 else 'no improvement'}). Only TWO "
-                                "clean editions exist (FIFA starts at 15; 2014 would be "
-                                "post-WC leakage) — underpowered, treat as exploratory."
+                                "clean editions (FIFA starts at 15; 2014 = post-WC "
+                                "leakage) — underpowered, exploratory."
+                                + (" The `*leaky` actual-XI rows use in-tournament "
+                                   "line-ups (selections/injuries revealed), so they "
+                                   "flatter the model — a diagnostic upper bound, not a "
+                                   "valid OOS number." if compare_axi else "")
                             )
                     except Exception as exc:
-                        st.warning(f"FIFA ability comparison unavailable: {exc}")
+                        st.warning(f"Ability comparison unavailable: {exc}")
                 if edition == "All since 1998":
                     if not ml["per_edition"].empty:
                         st.caption("Per edition")

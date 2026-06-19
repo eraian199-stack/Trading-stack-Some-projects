@@ -225,6 +225,27 @@ def test_combine_ability_blends_only_where_present():
     assert abs(out2["A"] - out["A"]) < 1e-9
 
 
+def test_wc_start_weights_counts_starts_and_subs(monkeypatch):
+    """Actual-tournament-XI weighting counts starts (1.0) + sub appearances (0.3)
+    per player across the edition, keyed by (family, given-initial)."""
+    from soccer_predictor.data import squad_value as sv
+    df = pd.DataFrame([
+        {"tournament_id": "WC-2018", "team_name": "Testland", "given_name": "Al",
+         "family_name": "Pha", "starter": 1, "substitute": 0},
+        {"tournament_id": "WC-2018", "team_name": "Testland", "given_name": "Al",
+         "family_name": "Pha", "starter": 1, "substitute": 0},   # 2 starts
+        {"tournament_id": "WC-2018", "team_name": "Testland", "given_name": "Be",
+         "family_name": "Ta", "starter": 0, "substitute": 1},     # 1 sub
+        {"tournament_id": "WC-2022", "team_name": "Testland", "given_name": "X",
+         "family_name": "Y", "starter": 1, "substitute": 0},      # other edition -> excluded
+    ])
+    monkeypatch.setattr(sv, "fetch_wc_appearances", lambda: df)
+    w = sv.wc_start_weights(2018, sub_weight=0.3)
+    assert w["Testland"][("pha", "a")] == 2.0
+    assert abs(w["Testland"][("ta", "b")] - 0.3) < 1e-9
+    assert ("y", "x") not in w.get("Testland", {})  # 2022 row excluded
+
+
 def test_xi_weighted_mean_emphasises_starting_xi():
     """Squad strength weights the projected XI (top 11 by rating) far above the
     bench, instead of an equal-weighted top-K where the 23rd man counts fully."""

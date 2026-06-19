@@ -238,7 +238,12 @@ See [docs/data_sources.md](docs/data_sources.md) for the full free-vs-paid map.
   exist (FIFA starts at 15; 2014 would be post-WC leakage), so it is underpowered
   and stays **off by default**. Test it yourself: the **Backtest Lab** tab has a
   *"Test the FIFA squad-ability overlay"* toggle (plain-Elo vs Elo+ability
-  head-to-head, and it tilts the single-edition probabilities).
+  head-to-head, and it tilts the single-edition probabilities). An optional
+  *"compare ACTUAL tournament starters"* checkbox adds a variant that weights each
+  squad by who really started/subbed that World Cup (free CC0 jfjelstul line-ups,
+  93–100% name-joined to the ability sources) — but it **leaks** (in-tournament
+  selections), so it's a labelled diagnostic/upper-bound (≈−0.008 vs −0.0076 for
+  the clean rank-XI), not a valid OOS number.
 - **Live ability overlay (experimental, off by default).** The World Cup tab's
   *"Squad-ability overlay"* toggle tilts the Elo engine toward squad ability.
   FIFA `overall` + age-adjusted Transfermarkt ability (value de-aged both ways —

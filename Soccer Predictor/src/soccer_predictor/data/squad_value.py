@@ -211,6 +211,7 @@ def build_squad_value(
 # header gated to scripts, so this open mirror is how we "get the data".
 # --------------------------------------------------------------------------- #
 import io
+import unicodedata
 import urllib.parse
 
 _FIFA_URL = (
@@ -419,6 +420,178 @@ def build_tm_ability(
         vals.sort(reverse=True)
         rows.append({"team": normalize_team_name(nat),
                      "ability": float(_xi_weighted_mean(vals, squad=top_k)), "n_covered": len(vals)})
+    return pd.DataFrame(rows).sort_values("ability", ascending=False).reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
+# OPTIONAL DIAGNOSTIC: weight a squad by who ACTUALLY started the tournament.
+# Lineups from the CC0 jfjelstul/worldcup DB (player_appearances.csv, every men's
+# WC). LEAKY for backtesting that edition (in-tournament selections/injuries are
+# revealed), so this is a comparison/upper-bound, NOT a clean OOS number -- the
+# default stays leakage-free rating-rank. Player STRENGTH still comes from the
+# ability sources (FIFA / Transfermarkt / a SofaScore-FotMob CSV), blended.
+# --------------------------------------------------------------------------- #
+WC_MENS_YEARS = [1998, 2002, 2006, 2010, 2014, 2018, 2022]
+_WC_APPEARANCES_URL = (
+    "https://raw.githubusercontent.com/jfjelstul/worldcup/master/data-csv/"
+    "player_appearances.csv"
+)
+
+
+def _norm(s: object) -> str:
+    s = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode().lower()
+    return " ".join(s.split())
+
+
+def _name_key(given: object, family: object) -> tuple[str, str]:
+    """Match key for joining names across sources: (family, given-initial)."""
+    return (_norm(family), _norm(given)[:1])
+
+
+def fetch_wc_appearances() -> pd.DataFrame:
+    """Per-match player appearances for every men's World Cup (jfjelstul, CC0)."""
+    raw = _cached_bytes(_WC_APPEARANCES_URL, "jfjelstul_appearances.csv", ttl_days=90.0)
+    return pd.read_csv(
+        io.BytesIO(raw),
+        usecols=["tournament_id", "team_name", "family_name", "given_name",
+                 "starter", "substitute"],
+    )
+
+
+def wc_start_weights(year: int, *, sub_weight: float = 0.3) -> dict[str, dict]:
+    """{team: {name_key: weight}} from actual tournament playing time -- starts
+    count 1.0 each, sub appearances ``sub_weight``, summed across the edition."""
+    df = fetch_wc_appearances()
+    df = df[df["tournament_id"] == f"WC-{year}"]
+    out: dict[str, dict] = {}
+    for r in df.itertuples(index=False):
+        w = (1.0 if int(r.starter) == 1 else 0.0) + (
+            sub_weight if int(r.substitute) == 1 else 0.0)
+        if w <= 0:
+            continue
+        team = normalize_team_name(r.team_name)
+        key = _name_key(r.given_name, r.family_name)
+        out.setdefault(team, {})
+        out[team][key] = out[team].get(key, 0.0) + w
+    return out
+
+
+def _fifa_player_map(year: int) -> dict[str, dict]:
+    """{team: {name_key: FIFA overall}} for the as-of snapshot."""
+    as_of = pd.Timestamp(WC_ASOF.get(year, f"{year}-06-15"))
+    snap = _fifa_snapshot(fetch_fifa_players(), WC_FIFA_VERSION[year], as_of)
+    out: dict[str, dict] = {}
+    for r in snap.itertuples(index=False):
+        if pd.isna(r.overall):
+            continue
+        parts = _norm(r.short_name).split()
+        if not parts:
+            continue
+        key = (parts[-1], parts[0][:1])
+        team = normalize_team_name(str(r.nationality_name))
+        d = out.setdefault(team, {})
+        d[key] = max(d.get(key, 0.0), float(r.overall))
+    return out
+
+
+def _tm_player_map(year: int) -> dict[str, dict]:
+    """{team: {name_key: age-adjusted TM value}} as of that WC."""
+    from .players import _age_value_retention
+    as_of_ms = int(pd.Timestamp(WC_ASOF[year]).timestamp() * 1000)
+    out: dict[str, dict] = {}
+    for p in fetch_players(year):
+        nat = _citizenship(p)
+        if not nat or not p.get("last_name"):
+            continue
+        va = _value_age_as_of(p, as_of_ms)
+        if va is None or va[0] <= 0:
+            continue
+        value, age = va
+        ability = value / _age_value_retention(age) if age is not None else value
+        key = _name_key(p.get("name"), p.get("last_name"))
+        d = out.setdefault(normalize_team_name(nat), {})
+        d[key] = max(d.get(key, 0.0), ability)
+    return out
+
+
+def _player_csv_map(path: str | Path) -> dict[str, dict]:
+    """{team: {name_key: rating}} from a per-player CSV (team + player + rating)."""
+    df = pd.read_csv(path)
+    lc = {str(c).strip().lower(): c for c in df.columns}
+    tcol = next((lc[k] for k in ("team", "nation", "country") if k in lc), None)
+    pcol = next((lc[k] for k in ("player", "name", "player_name") if k in lc), None)
+    rcol = next((lc[k] for k in ("rating", "ability", "strength", "value", "score",
+                                 "overall") if k in lc), None)
+    if not (tcol and pcol and rcol):
+        return {}
+    out: dict[str, dict] = {}
+    for r in df.itertuples(index=False):
+        rating = pd.to_numeric(getattr(r, rcol, None), errors="coerce")
+        if pd.isna(rating):
+            continue
+        parts = _norm(getattr(r, pcol)).split()
+        if not parts:
+            continue
+        key = (parts[-1], parts[0][:1])
+        d = out.setdefault(normalize_team_name(getattr(r, tcol)), {})
+        d[key] = max(d.get(key, 0.0), float(rating))
+    return out
+
+
+def _zscore_player_map(m: dict[str, dict]) -> dict[str, dict]:
+    """Z-score a {team: {key: value}} map across all players (log-scale money)."""
+    import numpy as np
+    vals = np.array([v for d in m.values() for v in d.values()], dtype=float)
+    if not vals.size:
+        return {}
+    log = vals.max() > 1000.0
+    arr = np.log1p(np.clip(vals, 0.0, None)) if log else vals
+    mean, std = float(arr.mean()), (float(arr.std()) or 1.0)
+    def tx(v: float) -> float:
+        x = float(np.log1p(max(0.0, v))) if log else float(v)
+        return (x - mean) / std
+    return {team: {k: tx(v) for k, v in d.items()} for team, d in m.items()}
+
+
+def build_actual_xi_ability(
+    year: int, *, min_starters: int = 8, csv_path: str | Path | None = None,
+) -> pd.DataFrame:
+    """Per-nation squad ability weighted by ACTUAL tournament playing time.
+
+    Each player's blended strength (FIFA + age-adjusted Transfermarkt + an
+    optional per-player CSV, z-scored per source and averaged) is weighted by how
+    much he actually started/subbed in that World Cup. DIAGNOSTIC ONLY -- it uses
+    in-tournament line-ups, so it leaks when scoring that same edition.
+    """
+    weights = wc_start_weights(year)
+    if not weights:
+        return pd.DataFrame(columns=["team", "ability", "n_starters_matched"])
+    zmaps = []
+    for build in (_fifa_player_map, _tm_player_map):
+        try:
+            zmaps.append(_zscore_player_map(build(year)))
+        except Exception:
+            continue
+    if csv_path and Path(csv_path).exists():
+        try:
+            zmaps.append(_zscore_player_map(_player_csv_map(csv_path)))
+        except Exception:
+            pass
+    zmaps = [z for z in zmaps if z]
+    rows = []
+    for team, kw in weights.items():
+        num = den = 0.0
+        matched = 0
+        for key, w in kw.items():
+            zs = [zm[team][key] for zm in zmaps if team in zm and key in zm[team]]
+            if not zs:
+                continue
+            num += (sum(zs) / len(zs)) * w
+            den += w
+            matched += 1
+        if matched >= min_starters and den > 0:
+            rows.append({"team": team, "ability": num / den,
+                         "n_starters_matched": matched})
     return pd.DataFrame(rows).sort_values("ability", ascending=False).reset_index(drop=True)
 
 
