@@ -419,11 +419,25 @@ def _wc_tournament_backtest(edition: str, n_sims: int) -> dict:
 
 @st.cache_data(show_spinner="Loading FIFA squad-ability ratings...", ttl=3600)
 def _wc_fifa_ability() -> dict:
-    """{year: Elo-point adjustments} from FIFA squad ability, for the overlay."""
+    """{year: Elo-point adjustments} from FIFA squad ability, optionally SUPPLEMENTED
+    per edition by data/ability_overlay_<year>.csv (e.g. that season's SofaScore
+    ratings), blended z-score-wise where both exist."""
     from ..data import players, squad_value
     byyear = squad_value.build_fifa_ability_by_year(list(squad_value.WC_FIFA_VERSION))
-    return {y: players.to_elo_adjustment(byyear[y], spread=60.0, log=False)
-            for y in byyear}
+    out = {}
+    for y, fifa in byyear.items():
+        sources = [fifa]
+        csv = Path(f"data/ability_overlay_{y}.csv")
+        if csv.exists():
+            try:
+                extra = squad_value.load_ability_csv(str(csv))
+                if extra:
+                    sources.append(extra)
+            except Exception:
+                pass
+        combined = squad_value.combine_ability(sources)
+        out[y] = players.to_elo_adjustment(combined, spread=60.0, log=False)
+    return out
 
 
 @st.cache_data(show_spinner="Backtesting FIFA ability vs Elo...", ttl=3600)
@@ -859,29 +873,36 @@ def _live_train() -> pd.DataFrame:
 
 @st.cache_data(show_spinner="Building squad-ability overlay...", ttl=3600)
 def _live_ability() -> tuple[dict, str]:
-    """Optional ability overlay for the live model: a user CSV if present, else an
-    age-adjusted Transfermarkt ability proxy. Returns (Elo-point adjustments, source
-    label). Empty dict if unavailable (the overlay then no-ops -> pure Elo)."""
+    """Ability overlay for the live model: FIFA squad ability, SUPPLEMENTED by any
+    rating-site CSVs you drop in (data/ability_overlay_*.csv -- SofaScore, etc.),
+    blended z-score-wise. Returns (Elo-point adjustments, source label); empty if
+    nothing is available (overlay then no-ops -> pure Elo)."""
     from ..data import players, squad_value
-    csv = Path("data/ability_overlay_2026.csv")
-    try:
-        if csv.exists():
-            # Any reputable site's export (SofaScore/FotMob/WhoScored/...), per-team
-            # or per-player; aggregated + scale-detected below.
-            raw = squad_value.load_ability_csv(str(csv))
-            src = f"your ability_overlay_2026.csv ({len(raw)} teams)"
-        else:
-            df = squad_value.build_fifa_current_ability()  # real ability, global coverage
-            raw = dict(zip(df["team"], df["ability"]))
-            ver = int(df["source_year"].iloc[0]) if len(df) else "?"
-            src = f"EA-FC/FIFA {ver} squad ability (overall ratings)"
-    except Exception as exc:
-        return {}, f"unavailable ({exc})"
-    if not raw:
-        return {}, "no usable rows in the overlay source"
-    # Heavy-tailed money (€, millions) wants a log; bounded ratings (0-10) do not.
-    use_log = max(raw.values()) > 1000.0
-    return players.to_elo_adjustment(raw, spread=60.0, log=use_log), src
+    sources: list[dict] = []
+    labels: list[str] = []
+    try:  # FIFA ability is the auto-fetched base
+        df = squad_value.build_fifa_current_ability()
+        d = dict(zip(df["team"], df["ability"]))
+        if d:
+            sources.append(d)
+            labels.append(f"FIFA {int(df['source_year'].iloc[0])} ({len(d)})")
+    except Exception:
+        pass
+    for p in sorted(Path("data").glob("ability_overlay_*.csv")):  # optional supplements
+        try:
+            d = squad_value.load_ability_csv(str(p))
+            if d:
+                sources.append(d)
+                labels.append(f"{p.stem.replace('ability_overlay_', '')} ({len(d)})")
+        except Exception:
+            continue
+    if not sources:
+        return {}, "no ability source available"
+    combined = squad_value.combine_ability(sources)  # z-scored blend, only-where-present
+    if not combined:
+        return {}, "no usable ability rows"
+    # `combined` is already z-scored; to_elo_adjustment re-normalises to spread.
+    return players.to_elo_adjustment(combined, spread=60.0, log=False), " + ".join(labels)
 
 
 @st.cache_resource(show_spinner="Fitting model on real history...")
@@ -947,14 +968,13 @@ def _tab_world_cup() -> None:
     ability_on = st.toggle(
         "Squad-ability overlay (experimental, NOT backtested)", value=False,
         key="wc_ability",
-        help="Tilt the Elo engine toward squad ABILITY. Source: age-adjusted "
-        "Transfermarkt value by default, OR drop any reputable rating site's export "
-        "(SofaScore / FotMob / WhoScored — their APIs are browser-gated, so export "
-        "to CSV) into data/ability_overlay_2026.csv (a team+rating column, per-team "
-        "or per-player; auto-aggregated, any scale). Backtested on past WCs this did "
-        "NOT beat plain Elo and the market anchor already prices ability, so it is "
-        "off by default and exploratory. Under-covered nations fall back to pure "
-        "Elo; only affects the Elo model.",
+        help="Tilt the Elo engine toward squad ABILITY. Base: EA-FC/FIFA overall "
+        "ratings (auto-fetched, global coverage), SUPPLEMENTED by any rating-site "
+        "exports you drop in as data/ability_overlay_*.csv (SofaScore / FotMob / "
+        "WhoScored — their APIs are browser-gated, so export to CSV; per-team or "
+        "per-player, any scale). Sources are blended z-score-wise, only where each "
+        "has data. Exploratory and off by default (the market anchor already prices "
+        "ability); under-covered nations fall back to pure Elo; Elo model only.",
     )
     if c4.button("🔄 Refresh live data"):
         # Force a fresh martj42 download (bypass the disk cache) so a just-played

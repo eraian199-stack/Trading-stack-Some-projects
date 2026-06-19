@@ -418,6 +418,38 @@ def load_ability_csv(
     return out
 
 
+def combine_ability(sources: list[dict[str, float]]) -> dict[str, float]:
+    """Blend several ability sources into one z-scored {team: strength}.
+
+    Each source is z-scored over its OWN teams first, so different scales
+    (FIFA overall 0-100, SofaScore 0-10, market value in €) become comparable;
+    then per team we average the z-scores of whatever sources cover it. A team in
+    only one source keeps that source's z; a team in none is absent (so the model
+    falls back to pure Elo for it). This is the "supplement, optional, only where
+    data exists" rule: pass ``[fifa]`` for FIFA-only, or ``[fifa, sofascore, ...]``
+    to enrich it with any other reputable ratings you have.
+    """
+    import numpy as np
+
+    zsources: list[dict[str, float]] = []
+    for src in sources:
+        if not src:
+            continue
+        vals = np.array(list(src.values()), dtype=float)
+        mean = float(vals.mean())
+        std = float(vals.std()) or 1.0
+        zsources.append({t: (float(v) - mean) / std for t, v in src.items()})
+    if not zsources:
+        return {}
+    teams: set[str] = set().union(*[set(z) for z in zsources])
+    out: dict[str, float] = {}
+    for t in teams:
+        zs = [z[t] for z in zsources if t in z]
+        if zs:
+            out[t] = float(sum(zs) / len(zs))
+    return out
+
+
 def load_squad_value_by_year(path: Path = SQUAD_VALUE_CSV) -> dict[int, dict[str, float]]:
     """Read the persisted table into ``{year: {team: squad_value_eur}}``."""
     if not Path(path).exists():

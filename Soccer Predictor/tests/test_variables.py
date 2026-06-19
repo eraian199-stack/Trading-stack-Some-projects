@@ -209,6 +209,22 @@ def test_load_ability_csv_per_team_and_per_player(tmp_path):
     assert abs(out2["France"] - 7.5) < 1e-9 and abs(out2["Brazil"] - 9.0) < 1e-9
 
 
+def test_combine_ability_blends_only_where_present():
+    """Blending z-scores each source, averages where they overlap, keeps singletons,
+    and drops teams no source has (so they fall back to pure Elo)."""
+    from soccer_predictor.data import squad_value as sv
+    fifa = {"A": 90.0, "B": 80.0, "C": 70.0}          # 0-100 scale
+    sofa = {"A": 7.5, "B": 6.5, "D": 9.0}             # 0-10 scale (different scale)
+    out = sv.combine_ability([fifa, sofa])
+    assert set(out) == {"A", "B", "C", "D"}           # union; nothing else
+    # A is top of both -> highest; C only in fifa (its low z), D only in sofa (its top z)
+    assert out["A"] > out["B"]
+    assert out["D"] > out["C"]                          # D is sofa's best, C is fifa's worst
+    # scale-invariant: scaling a source by 10x doesn't change the blend
+    out2 = sv.combine_ability([fifa, {k: v * 10 for k, v in sofa.items()}])
+    assert abs(out2["A"] - out["A"]) < 1e-9
+
+
 def test_fifa_ability_snapshot_pre_wc_and_aggregate(monkeypatch):
     """FIFA ability uses the rating snapshot on/before kickoff (no leakage) and
     aggregates each nation's top-K overall."""

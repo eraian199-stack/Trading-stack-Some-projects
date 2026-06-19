@@ -235,13 +235,15 @@ See [docs/data_sources.md](docs/data_sources.md) for the full free-vs-paid map.
   *"Test the FIFA squad-ability overlay"* toggle (plain-Elo vs Elo+ability
   head-to-head, and it tilts the single-edition probabilities).
 - **Live ability overlay (experimental, off by default).** The World Cup tab's
-  *"Squad-ability overlay"* toggle tilts the Elo engine toward squad ability —
-  EA-FC/FIFA ratings by default, or **any reputable site** you export to
-  `data/ability_overlay_2026.csv` (SofaScore/FotMob/WhoScored APIs are
-  Cloudflare/signed-header gated to scripts, so export from the browser; per-team
-  **or** per-player, auto-aggregated, any scale). Labelled not-backtested;
-  under-covered nations fall back to pure Elo; the live model already anchors to
-  the market, which prices ability anyway.
+  *"Squad-ability overlay"* toggle tilts the Elo engine toward squad ability.
+  FIFA `overall` is the auto-fetched base, **supplemented** by any reputable
+  site's ratings you drop in as `data/ability_overlay_*.csv` (SofaScore / FotMob /
+  WhoScored APIs are browser-gated, so export to CSV; per-team **or** per-player,
+  any scale). Sources are **blended z-score-wise, only where each has data** —
+  optional and additive: a team no source covers falls back to pure Elo, a team in
+  only one source uses that one. (The backtest can be supplemented the same way per
+  edition via `data/ability_overlay_<year>.csv`.) Labelled not-backtested; the live
+  model already anchors to the market, which prices ability anyway.
 - A model is only as fresh as its data; without xG / lineups / injuries / odds it
   cannot see them.
 - **Positive betting ROI is a hypothesis, not proof.** Beating the *closing* line
