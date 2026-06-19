@@ -225,6 +225,18 @@ def test_combine_ability_blends_only_where_present():
     assert abs(out2["A"] - out["A"]) < 1e-9
 
 
+def test_xi_weighted_mean_emphasises_starting_xi():
+    """Squad strength weights the projected XI (top 11 by rating) far above the
+    bench, instead of an equal-weighted top-K where the 23rd man counts fully."""
+    from soccer_predictor.data.squad_value import _xi_weighted_mean
+    vals = [90.0] * 11 + [50.0] * 12          # strong XI, weak bench
+    w = _xi_weighted_mean(vals, squad=23, xi=11)
+    assert w > sum(vals) / len(vals)          # XI dominates -> pulled toward 90
+    assert abs(w - (11 * 90 + 12 * 0.25 * 50) / (11 + 12 * 0.25)) < 1e-9  # ~81.4
+    # squad within the XI band -> plain mean (every player a "starter")
+    assert abs(_xi_weighted_mean([80.0, 70.0], squad=23, xi=11) - 75.0) < 1e-9
+
+
 def test_age_retention_trims_young_and_boosts_old_symmetrically():
     """De-aging must cut both ways: young value is inflated by potential (ratio >1
     -> trimmed), veteran value is age-discounted (ratio <1 -> boosted), ~0.06/yr."""

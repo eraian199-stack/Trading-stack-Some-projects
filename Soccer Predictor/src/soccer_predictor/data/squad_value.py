@@ -126,6 +126,25 @@ def _citizenship(player: dict) -> str | None:
     return c if isinstance(c, str) and c.strip() else None
 
 
+def _xi_weighted_mean(values_desc: list[float], squad: int = 23, xi: int = 11) -> float:
+    """Squad strength weighted toward the projected STARTING XI.
+
+    True national-team line-ups / minutes are not freely available historically
+    (martj42 has scores only; the Transfermarkt/dcaribou line-up data is
+    club-competition only), so the projected XI is approximated by RATING RANK --
+    a manager starts his best players. The top ``xi`` (sorted desc) get full
+    weight; the bench (xi+1..squad) gets 0.25 (impact subs / depth); deeper
+    reserves get 0. So the XI carries ~78% of the weight instead of the old
+    equal-weighted top-K, where the 23rd man counted as much as a nailed-on
+    starter. ``values_desc`` must already be sorted high-to-low.
+    """
+    vals = values_desc[:squad]
+    if not vals:
+        return 0.0
+    weights = [1.0 if i < xi else 0.25 for i in range(len(vals))]
+    return sum(v * w for v, w in zip(vals, weights)) / sum(weights)
+
+
 def _value_as_of(player: dict, as_of_ms: int) -> float | None:
     """The player's market value (EUR) at the LAST valuation on/before as_of_ms."""
     hist = player.get("market_value_history")
@@ -173,11 +192,10 @@ def build_squad_value(
         if len(vals) < min_covered:
             continue
         vals.sort(reverse=True)
-        core = vals[:top_k]
         rows.append({
             "team": normalize_team_name(nat),
             "year": year,
-            "squad_value_eur": float(sum(core) / len(core)),
+            "squad_value_eur": float(_xi_weighted_mean(vals, squad=top_k)),
             "n_covered": len(vals),
         })
     df = pd.DataFrame(rows).sort_values("squad_value_eur", ascending=False)
@@ -236,9 +254,8 @@ def _aggregate_ability(snap: pd.DataFrame, top_k: int, min_covered: int) -> pd.D
         vals = sorted((float(v) for v in grp["overall"]), reverse=True)
         if len(vals) < min_covered:
             continue
-        core = vals[:top_k]
         rows.append({"team": normalize_team_name(str(nat)),
-                     "ability": float(sum(core) / len(core)), "n_covered": len(vals)})
+                     "ability": float(_xi_weighted_mean(vals, squad=top_k)), "n_covered": len(vals)})
     return pd.DataFrame(rows).sort_values("ability", ascending=False).reset_index(drop=True)
 
 
@@ -340,10 +357,9 @@ def build_current_ability(
         if len(vals) < min_covered:
             continue
         vals.sort(reverse=True)
-        core = vals[:top_k]
         rows.append({
             "team": normalize_team_name(nat),
-            "ability": float(sum(core) / len(core)),
+            "ability": float(_xi_weighted_mean(vals, squad=top_k)),
             "n_covered": len(vals),
             "source_year": year,
         })
@@ -401,9 +417,8 @@ def build_tm_ability(
         if len(vals) < min_covered:
             continue
         vals.sort(reverse=True)
-        core = vals[:top_k]
         rows.append({"team": normalize_team_name(nat),
-                     "ability": float(sum(core) / len(core)), "n_covered": len(vals)})
+                     "ability": float(_xi_weighted_mean(vals, squad=top_k)), "n_covered": len(vals)})
     return pd.DataFrame(rows).sort_values("ability", ascending=False).reset_index(drop=True)
 
 
@@ -470,8 +485,7 @@ def load_ability_csv(
         vals = sorted((float(v) for v in grp), reverse=True)
         if len(vals) < min_covered:
             continue
-        core = vals[:top_k]
-        out[str(team)] = float(sum(core) / len(core))
+        out[str(team)] = float(_xi_weighted_mean(vals, squad=top_k))
     return out
 
 

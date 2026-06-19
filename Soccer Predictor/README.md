@@ -246,8 +246,11 @@ See [docs/data_sources.md](docs/data_sources.md) for the full free-vs-paid map.
   auto-fetched base, **supplemented** by any
   reputable site's ratings you drop in as `data/ability_overlay_*.csv` (SofaScore /
   FotMob / WhoScored APIs are browser-gated, so export to CSV; per-team **or**
-  per-player, any scale). Sources are **blended z-score-wise (money log-scaled
-  first), only where each has data** —
+  per-player, any scale). Each nation's strength is **weighted toward its
+  projected starting XI** (top 11 by rating get full weight, the bench ~0.25 —
+  true national-team minutes aren't free, so rank stands in for "who starts").
+  Sources are **blended z-score-wise (money log-scaled first), only where each
+  has data** —
   optional and additive: a team no source covers falls back to pure Elo, a team in
   only one source uses that one. (The backtest can be supplemented the same way per
   edition via `data/ability_overlay_<year>.csv`.) Labelled not-backtested; the live
