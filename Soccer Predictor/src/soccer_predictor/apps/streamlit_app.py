@@ -427,6 +427,13 @@ def _wc_fifa_ability() -> dict:
     out = {}
     for y, fifa in byyear.items():
         sources = [fifa]
+        try:  # age-adjusted Transfermarkt ability for that edition
+            tdf = squad_value.build_tm_ability(y)
+            td = dict(zip(tdf["team"], tdf["ability"]))
+            if td:
+                sources.append(td)
+        except Exception:
+            pass
         csv = Path(f"data/ability_overlay_{y}.csv")
         if csv.exists():
             try:
@@ -561,11 +568,12 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
     ability_on = st.toggle(
         "Test the FIFA squad-ability overlay (experimental)", value=False,
         key="wc_bt_ability",
-        help="Real EA-FC/FIFA squad ability (overall ratings, global coverage) as a "
-        "pre-tournament overlay. Adds a plain-Elo vs Elo+ability head-to-head on the "
-        "clean editions (2018 & 2022) and tilts the single-edition probabilities. "
-        "Backtest shows a SMALL improvement over Elo, but only 2 clean editions "
-        "exist (underpowered) — exploratory.",
+        help="Squad ability as a pre-tournament overlay, blended z-score-wise from "
+        "EA-FC/FIFA overall ratings + age-adjusted Transfermarkt ability (+ any "
+        "data/ability_overlay_<year>.csv you add). Adds a plain-Elo vs Elo+ability "
+        "head-to-head on the clean editions (2018 & 2022) and tilts the "
+        "single-edition probabilities. Backtest shows a SMALL improvement over Elo, "
+        "but only 2 clean editions exist (underpowered) — exploratory.",
     )
     ability_w = 0.5 if ability_on else 0.0
     if st.button("Run World Cup backtest", type="primary", key="wc_bt_run"):
@@ -888,6 +896,14 @@ def _live_ability() -> tuple[dict, str]:
             labels.append(f"FIFA {int(df['source_year'].iloc[0])} ({len(d)})")
     except Exception:
         pass
+    try:  # age-adjusted Transfermarkt ability (de-aged value) as another source
+        tdf = squad_value.build_current_ability()
+        td = dict(zip(tdf["team"], tdf["ability"]))
+        if td:
+            sources.append(td)
+            labels.append(f"TM-deaged {int(tdf['source_year'].iloc[0])} ({len(td)})")
+    except Exception:
+        pass
     for p in sorted(Path("data").glob("ability_overlay_*.csv")):  # optional supplements
         try:
             d = squad_value.load_ability_csv(str(p))
@@ -968,13 +984,14 @@ def _tab_world_cup() -> None:
     ability_on = st.toggle(
         "Squad-ability overlay (experimental, NOT backtested)", value=False,
         key="wc_ability",
-        help="Tilt the Elo engine toward squad ABILITY. Base: EA-FC/FIFA overall "
-        "ratings (auto-fetched, global coverage), SUPPLEMENTED by any rating-site "
-        "exports you drop in as data/ability_overlay_*.csv (SofaScore / FotMob / "
-        "WhoScored — their APIs are browser-gated, so export to CSV; per-team or "
-        "per-player, any scale). Sources are blended z-score-wise, only where each "
-        "has data. Exploratory and off by default (the market anchor already prices "
-        "ability); under-covered nations fall back to pure Elo; Elo model only.",
+        help="Tilt the Elo engine toward squad ABILITY, blended z-score-wise from "
+        "EA-FC/FIFA overall ratings + age-adjusted Transfermarkt ability "
+        "(auto-fetched), SUPPLEMENTED by any rating-site exports you drop in as "
+        "data/ability_overlay_*.csv (SofaScore / FotMob / WhoScored — browser-gated "
+        "APIs, so export to CSV; per-team or per-player, any scale). Blended only "
+        "where each source has data. Off by default and exploratory (the market "
+        "anchor already prices ability); uncovered nations fall back to pure Elo; "
+        "Elo model only.",
     )
     if c4.button("🔄 Refresh live data"):
         # Force a fresh martj42 download (bypass the disk cache) so a just-played

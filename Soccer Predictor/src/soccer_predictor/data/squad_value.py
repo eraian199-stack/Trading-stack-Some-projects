@@ -350,6 +350,63 @@ def build_current_ability(
     return pd.DataFrame(rows).sort_values("ability", ascending=False).reset_index(drop=True)
 
 
+def _value_age_as_of(player: dict, as_of_ms: int) -> tuple[float, float | None] | None:
+    """(market value, age) at the last valuation on/before ``as_of_ms``, or None."""
+    hist = player.get("market_value_history")
+    if not isinstance(hist, list) or not hist:
+        return None
+    best_x = None
+    best: tuple[float, float | None] | None = None
+    for pt in hist:
+        x, y = pt.get("x"), pt.get("y")
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            continue
+        if x <= as_of_ms and (best_x is None or x > best_x):
+            try:
+                age = float(pt.get("age")) if pt.get("age") not in (None, "") else None
+            except (TypeError, ValueError):
+                age = None
+            best_x, best = x, (float(y), age)
+    return best
+
+
+def build_tm_ability(
+    year: int, *, top_k: int = 20, min_covered: int = 15
+) -> pd.DataFrame:
+    """Per-nation AGE-ADJUSTED Transfermarkt ability as of ``year``'s World Cup.
+
+    Like :func:`build_squad_value` but each player's as-of value is DE-AGED via
+    :func:`players._age_value_retention` (so a 33-year-old great is rated on
+    ability, not his age-discounted price) -- the historical analogue of
+    :func:`build_current_ability`, for blending into the backtest overlay.
+    """
+    from .players import _age_value_retention
+
+    if year not in WC_ASOF:
+        raise ValueError(f"no as-of date for {year}; covered: {sorted(WC_ASOF)}")
+    as_of_ms = int(pd.Timestamp(WC_ASOF[year]).timestamp() * 1000)
+    by_nat: dict[str, list[float]] = {}
+    for p in fetch_players(year):
+        nat = _citizenship(p)
+        if not nat:
+            continue
+        va = _value_age_as_of(p, as_of_ms)
+        if va is None or va[0] <= 0:
+            continue
+        value, age = va
+        ability = value / _age_value_retention(age) if age is not None else value
+        by_nat.setdefault(nat, []).append(ability)
+    rows = []
+    for nat, vals in by_nat.items():
+        if len(vals) < min_covered:
+            continue
+        vals.sort(reverse=True)
+        core = vals[:top_k]
+        rows.append({"team": normalize_team_name(nat),
+                     "ability": float(sum(core) / len(core)), "n_covered": len(vals)})
+    return pd.DataFrame(rows).sort_values("ability", ascending=False).reset_index(drop=True)
+
+
 SQUAD_VALUE_CSV = Path("data/squad_value_by_year.csv")
 
 
@@ -435,10 +492,14 @@ def combine_ability(sources: list[dict[str, float]]) -> dict[str, float]:
     for src in sources:
         if not src:
             continue
-        vals = np.array(list(src.values()), dtype=float)
+        items = {t: float(v) for t, v in src.items()}
+        vals = np.array(list(items.values()), dtype=float)
+        if vals.size and vals.max() > 1000.0:  # heavy-tailed money (€) -> log first
+            items = {t: float(np.log1p(max(0.0, v))) for t, v in items.items()}
+            vals = np.array(list(items.values()), dtype=float)
         mean = float(vals.mean())
         std = float(vals.std()) or 1.0
-        zsources.append({t: (float(v) - mean) / std for t, v in src.items()})
+        zsources.append({t: (v - mean) / std for t, v in items.items()})
     if not zsources:
         return {}
     teams: set[str] = set().union(*[set(z) for z in zsources])

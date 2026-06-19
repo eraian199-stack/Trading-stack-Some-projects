@@ -236,10 +236,12 @@ See [docs/data_sources.md](docs/data_sources.md) for the full free-vs-paid map.
   head-to-head, and it tilts the single-edition probabilities).
 - **Live ability overlay (experimental, off by default).** The World Cup tab's
   *"Squad-ability overlay"* toggle tilts the Elo engine toward squad ability.
-  FIFA `overall` is the auto-fetched base, **supplemented** by any reputable
-  site's ratings you drop in as `data/ability_overlay_*.csv` (SofaScore / FotMob /
-  WhoScored APIs are browser-gated, so export to CSV; per-team **or** per-player,
-  any scale). Sources are **blended z-score-wise, only where each has data** —
+  FIFA `overall` + age-adjusted Transfermarkt ability (value de-aged so a 33-yo
+  great isn't underrated) are the auto-fetched base, **supplemented** by any
+  reputable site's ratings you drop in as `data/ability_overlay_*.csv` (SofaScore /
+  FotMob / WhoScored APIs are browser-gated, so export to CSV; per-team **or**
+  per-player, any scale). Sources are **blended z-score-wise (money log-scaled
+  first), only where each has data** —
   optional and additive: a team no source covers falls back to pure Elo, a team in
   only one source uses that one. (The backtest can be supplemented the same way per
   edition via `data/ability_overlay_<year>.csv`.) Labelled not-backtested; the live

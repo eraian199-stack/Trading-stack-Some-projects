@@ -225,6 +225,25 @@ def test_combine_ability_blends_only_where_present():
     assert abs(out2["A"] - out["A"]) < 1e-9
 
 
+def test_build_tm_ability_deages_as_of(monkeypatch):
+    """Per-edition TM ability uses the as-of-kickoff valuation (no leakage) and
+    de-ages it (a 33-yo great rated on ability, not his discounted price)."""
+    from soccer_predictor.data import squad_value as sv
+    from soccer_predictor.data.players import _age_value_retention
+
+    before = int(pd.Timestamp("2017-01-01").timestamp() * 1000)
+    after = int(pd.Timestamp("2019-01-01").timestamp() * 1000)  # after the 2018 WC
+    monkeypatch.setattr(sv, "fetch_players", lambda year: [
+        {"citizenship": "Testland", "name": f"P{i}", "market_value_history": [
+            {"x": before, "y": 10_000_000, "age": "33"},
+            {"x": after, "y": 99_000_000, "age": "35"}]}  # post-WC -> ignored
+        for i in range(15)
+    ])
+    a = sv.build_tm_ability(2018, top_k=10, min_covered=15)
+    row = a[a["team"] == "Testland"].iloc[0]
+    assert abs(row["ability"] - 10_000_000 / _age_value_retention(33.0)) < 1.0
+
+
 def test_fifa_ability_snapshot_pre_wc_and_aggregate(monkeypatch):
     """FIFA ability uses the rating snapshot on/before kickoff (no leakage) and
     aggregates each nation's top-K overall."""
