@@ -225,6 +225,18 @@ def test_combine_ability_blends_only_where_present():
     assert abs(out2["A"] - out["A"]) < 1e-9
 
 
+def test_wc_elo_factory_uncached_callers_cached():
+    """Regression: _wc_elo_factory returns a closure, so it must NOT be wrapped by
+    @st.cache_data (the closure can't be pickled when Streamlit writes the cache).
+    Its callers, which return plain dicts, must stay cached."""
+    from soccer_predictor.apps import streamlit_app as app
+    assert not hasattr(app._wc_elo_factory, "clear")        # the factory is plain
+    assert hasattr(app._wc_tournament_backtest, "clear")    # callers are cached
+    assert hasattr(app._wc_past_simulation, "clear")
+    model = app._wc_elo_factory(host_adv=50.0)(2018)        # builds a host-bumped Elo
+    assert model.host_advantage == 50.0 and "Russia" in model.hosts
+
+
 def test_host_advantage_bumps_only_the_host():
     """host_advantage adds Elo points to host teams' effective rating only, and
     flows into a higher predicted goal rate for the host."""

@@ -414,11 +414,11 @@ def _wc_matchlevel_backtest(edition: str, model_label: str = "Elo") -> dict:
     return {"pooled": res["pooled"], "floor": floor, "per_edition": per, "n": int(len(out))}
 
 
-@st.cache_data(show_spinner="Simulating past World Cups...", ttl=3600)
 def _wc_elo_factory(host_adv: float = 0.0, ability_by_year: dict | None = None,
                     ability_w: float = 0.0):
     """Edition-aware Elo factory: host home bump (per-edition WC_HOSTS) + optional
-    squad-ability tilt. Used in the all-neutral SIMULATION backtest path."""
+    squad-ability tilt. Used in the all-neutral SIMULATION backtest path. NOT a
+    cached function -- it returns a closure (unpicklable); its callers are cached."""
     def fac(year):
         kw: dict = {}
         if host_adv > 0:
@@ -429,6 +429,7 @@ def _wc_elo_factory(host_adv: float = 0.0, ability_by_year: dict | None = None,
     return fac
 
 
+@st.cache_data(show_spinner="Simulating past World Cups...", ttl=3600)
 def _wc_tournament_backtest(edition: str, n_sims: int, model_label: str = "Elo",
                             host_adv: float = 0.0) -> dict:
     """Full tournament-simulation scorecard (champion rank + stage calibration)."""
