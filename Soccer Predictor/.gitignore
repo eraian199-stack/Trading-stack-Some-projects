@@ -28,6 +28,10 @@ data/squad_value_by_year.csv
 # User/exported ability overlays (e.g. SofaScore ratings) for the squad overlay;
 # per-deployment snapshots, refreshed by re-export. Not committed.
 data/ability_overlay_*.csv
+# SofaScore club-season ratings built by scripts/build_sofascore_overlays.py.
+# Leakage-free but backtested as NOT helpful (dilutes FIFA+TM), so kept off the
+# auto-consumed path; per-deployment snapshot, not committed.
+data/sofascore_ratings_*.csv
 
 # Original uploaded reference framework (inputs that were merged into the stack)
 docs/files/
