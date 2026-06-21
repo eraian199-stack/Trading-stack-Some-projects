@@ -444,10 +444,12 @@ def _wc_tournament_backtest(edition: str, n_sims: int, model_label: str = "Elo",
 
 
 @st.cache_data(show_spinner="Loading FIFA squad-ability ratings...", ttl=3600)
-def _wc_fifa_ability() -> dict:
+def _wc_fifa_ability(sofa: bool = False) -> dict:
     """{year: Elo-point adjustments} from FIFA squad ability, optionally SUPPLEMENTED
     per edition by data/ability_overlay_<year>.csv (e.g. that season's SofaScore
-    ratings), blended z-score-wise where both exist."""
+    ratings), blended z-score-wise where both exist. ``sofa`` also blends the
+    backtested SofaScore club-season ratings (data/sofascore_ratings_<year>.csv) --
+    note these were measured to DILUTE the FIFA+TM blend; for experimentation."""
     from ..data import players, squad_value
     byyear = squad_value.build_fifa_ability_by_year(list(squad_value.WC_FIFA_VERSION))
     out = {}
@@ -460,14 +462,17 @@ def _wc_fifa_ability() -> dict:
                 sources.append(td)
         except Exception:
             pass
-        csv = Path(f"data/ability_overlay_{y}.csv")
-        if csv.exists():
-            try:
-                extra = squad_value.load_ability_csv(str(csv))
-                if extra:
-                    sources.append(extra)
-            except Exception:
-                pass
+        extra_csvs = [Path(f"data/ability_overlay_{y}.csv")]
+        if sofa:
+            extra_csvs.append(Path(f"data/sofascore_ratings_{y}.csv"))
+        for csv in extra_csvs:
+            if csv.exists():
+                try:
+                    extra = squad_value.load_ability_csv(str(csv))
+                    if extra:
+                        sources.append(extra)
+                except Exception:
+                    pass
         combined = squad_value.combine_ability(sources)
         out[y] = players.to_elo_adjustment(combined, spread=60.0, log=False)
     return out
@@ -495,12 +500,13 @@ def _wc_actual_xi_ability() -> dict:
 
 
 @st.cache_data(show_spinner="Backtesting squad ability vs Elo...", ttl=3600)
-def _wc_ability_leaderboard(include_actual_xi: bool = False) -> pd.DataFrame:
+def _wc_ability_leaderboard(include_actual_xi: bool = False, sofa: bool = False) -> pd.DataFrame:
     """Match-level OOS: plain Elo vs Elo+ability on the clean editions. The
     rating-rank XI is leakage-free; the optional actual-tournament-XI variant
-    (starred) is a leaky diagnostic."""
+    (starred) is a leaky diagnostic. ``sofa`` blends in SofaScore club-season
+    ratings (backtested to dilute -- for experimentation)."""
     from ..data import squad_value
-    adj = _wc_fifa_ability()
+    adj = _wc_fifa_ability(sofa)
     clean = [y for y in squad_value.WC_FIFA_VERSION if y not in squad_value.FIFA_LEAKAGE_EDITIONS]
     facs = {
         "elo": EloGoalsModel,
@@ -523,13 +529,14 @@ def _wc_ability_leaderboard(include_actual_xi: bool = False) -> pd.DataFrame:
 @st.cache_data(show_spinner="Simulating that World Cup...", ttl=3600)
 def _wc_past_simulation(
     year: int, n_sims: int, ability_w: float = 0.0, model_label: str = "Elo",
-    host_adv: float = 0.0,
+    host_adv: float = 0.0, sofa: bool = False,
 ) -> dict | None:
     """Groups + full per-team win/advancement probabilities for one past edition.
     The FIFA squad-ability tilt and the host home bump only apply to the Elo engine
-    (only Elo has those terms); other models are simulated as-is."""
+    (only Elo has those terms); other models are simulated as-is. ``sofa`` blends in
+    SofaScore club-season ratings (backtested to dilute -- for experimentation)."""
     if model_label == "Elo" and (ability_w > 0 or host_adv > 0):
-        adj = _wc_fifa_ability() if ability_w > 0 else None
+        adj = _wc_fifa_ability(sofa) if ability_w > 0 else None
         fac = _wc_elo_factory(host_adv=host_adv, ability_by_year=adj, ability_w=ability_w)
         return wc_backtest.simulate_past_world_cup(
             _live_history(), fac, year, n_simulations=n_sims)
@@ -556,11 +563,11 @@ def _actual_finish(team: str, reached: dict | None) -> str:
 
 def _render_past_wc_simulation(
     year: int, n_sims: int, ability_w: float = 0.0, model_label: str = "Elo",
-    host_adv: float = 0.0,
+    host_adv: float = 0.0, sofa: bool = False,
 ) -> None:
     """Groups + pre-tournament win/advancement probabilities for one past edition,
     shown next to what actually happened (the live tab's view, run on history)."""
-    res = _wc_past_simulation(year, n_sims, ability_w, model_label, host_adv)
+    res = _wc_past_simulation(year, n_sims, ability_w, model_label, host_adv, sofa)
     if res is None:
         st.info("Couldn't reconstruct that edition's groups from the fixtures.")
         return
@@ -571,7 +578,8 @@ def _render_past_wc_simulation(
         from ..data import squad_value
         if year in squad_value.WC_FIFA_VERSION:
             leak = " (FIFA 15 post-dates the 2014 WC — leakage)" if year in squad_value.FIFA_LEAKAGE_EDITIONS else ""
-            st.caption(f"⚗️ FIFA squad-ability overlay ON (weight {ability_w}){leak}.")
+            sf = " + SofaScore club-season ratings" if sofa else ""
+            st.caption(f"⚗️ FIFA squad-ability overlay ON (weight {ability_w}){sf}{leak}.")
         else:
             st.info(f"No FIFA ability ratings for {year} (mirror covers 2018+); showing plain Elo.")
     groups, sims, reached = res["groups"], res["sims"], res["reached"]
@@ -659,6 +667,18 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
             ".csv). It LEAKS (uses in-tournament selections), so it's an upper-bound "
             "diagnostic for comparison, NOT a valid out-of-sample score.",
         )
+    sofa_on = False
+    if ability_on and model_label == "Elo":
+        sofa_on = st.checkbox(
+            "↳ also blend SofaScore club-season ratings (experimental)",
+            value=False, key="wc_bt_sofa",
+            help="Adds SofaScore club-season player ratings for the season BEFORE each "
+            "World Cup (data/sofascore_ratings_<year>.csv, built by "
+            "scripts/build_sofascore_overlays.py) as a third source in the ability "
+            "blend. Backtested OOS it DILUTES the FIFA+TM blend (Elo+FIFA+TM @0.5 = "
+            "0.9902 vs +SofaScore @0.5 = 0.9926) — included so you can see that; "
+            "leave off for the best overlay.",
+        )
     host_on = st.toggle(
         "Host advantage in the bracket sim (backtested, Elo only)", value=False,
         key="wc_bt_host",
@@ -709,10 +729,11 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
                 )
                 if ability_on and model_label == "Elo":
                     try:
-                        lb = _wc_ability_leaderboard(compare_axi)
+                        lb = _wc_ability_leaderboard(compare_axi, sofa_on)
                         st.markdown(
                             "**Squad-ability vs plain Elo** — match-level OOS on the "
                             "clean editions (2018 & 2022), lower log loss = better"
+                            + (" · +SofaScore club-season ratings blended" if sofa_on else "")
                             + (" · `*leaky` rows weight the ACTUAL tournament XI"
                                if compare_axi else "")
                         )
@@ -767,7 +788,7 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
                     )
                 else:
                     _render_past_wc_simulation(
-                        int(edition), n_sims, ability_w, model_label, host_adv)
+                        int(edition), n_sims, ability_w, model_label, host_adv, sofa_on)
 
     st.divider()
 
@@ -991,10 +1012,12 @@ def _live_train() -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner="Building squad-ability overlay...", ttl=3600)
-def _live_ability() -> tuple[dict, str]:
+def _live_ability(sofa: bool = False) -> tuple[dict, str]:
     """Ability overlay for the live model: FIFA squad ability, SUPPLEMENTED by any
     rating-site CSVs you drop in (data/ability_overlay_*.csv -- SofaScore, etc.),
-    blended z-score-wise. Returns (Elo-point adjustments, source label); empty if
+    blended z-score-wise. ``sofa`` also blends the backtested SofaScore club-season
+    ratings (data/sofascore_ratings_2026.csv; measured to DILUTE FIFA+TM -- for
+    experimentation). Returns (Elo-point adjustments, source label); empty if
     nothing is available (overlay then no-ops -> pure Elo)."""
     from ..data import players, squad_value
     sources: list[dict] = []
@@ -1015,12 +1038,18 @@ def _live_ability() -> tuple[dict, str]:
             labels.append(f"TM-deaged {int(tdf['source_year'].iloc[0])} ({len(td)})")
     except Exception:
         pass
-    for p in sorted(Path("data").glob("ability_overlay_*.csv")):  # optional supplements
+    supplements = sorted(Path("data").glob("ability_overlay_*.csv"))
+    if sofa:  # optional SofaScore club-season ratings (backtested to dilute FIFA+TM)
+        sf = Path("data/sofascore_ratings_2026.csv")
+        if sf.exists():
+            supplements.append(sf)
+    for p in supplements:
         try:
             d = squad_value.load_ability_csv(str(p))
             if d:
                 sources.append(d)
-                labels.append(f"{p.stem.replace('ability_overlay_', '')} ({len(d)})")
+                labels.append(
+                    f"{p.stem.replace('ability_overlay_', '').replace('sofascore_ratings_', 'SofaScore ')} ({len(d)})")
         except Exception:
             continue
     if not sources:
@@ -1034,7 +1063,8 @@ def _live_ability() -> tuple[dict, str]:
 
 @st.cache_resource(show_spinner="Fitting model on real history...")
 def _live_model(
-    model_label: str, fingerprint: str, ability_w: float = 0.0, host_adv: float = 0.0
+    model_label: str, fingerprint: str, ability_w: float = 0.0, host_adv: float = 0.0,
+    sofa: bool = False,
 ) -> object:
     del fingerprint  # cache key only; new/changed results -> new key -> refit
     factory = MODEL_FACTORIES[model_label]
@@ -1044,7 +1074,7 @@ def _live_model(
     if isinstance(factory(), EloGoalsModel) and (ability_w > 0 or host_adv > 0):
         kwargs: dict = {}
         if ability_w > 0:
-            adj, _ = _live_ability()
+            adj, _ = _live_ability(sofa)
             if adj:
                 kwargs.update(squad_strength=adj, squad_weight=ability_w)
         if host_adv > 0:
@@ -1057,9 +1087,9 @@ def _live_model(
 @st.cache_data(show_spinner="Simulating World Cup 2026...", ttl=900)
 def _live_wc(
     model_label: str, n_sims: int, anchor: bool, fingerprint: str,
-    ability_w: float = 0.0, host_adv: float = 0.0,
+    ability_w: float = 0.0, host_adv: float = 0.0, sofa: bool = False,
 ) -> pd.DataFrame:
-    model = _live_model(model_label, fingerprint, ability_w, host_adv)
+    model = _live_model(model_label, fingerprint, ability_w, host_adv, sofa)
     groups = world_cup.load_groups()
     # Lock in games already played (history + live Odds-API results + ledger).
     world_cup.build_fixtures(_live_history(), groups, extra_results=_live_scores())
@@ -1144,6 +1174,16 @@ def _tab_world_cup() -> None:
         "anchor already prices ability); uncovered nations fall back to pure Elo; "
         "Elo model only.",
     )
+    sofa_on = False
+    if ability_on:
+        sofa_on = st.checkbox(
+            "↳ also blend SofaScore club-season ratings (experimental)",
+            value=False, key="wc_sofa",
+            help="Adds SofaScore 2025/26 club-season ratings "
+            "(data/sofascore_ratings_2026.csv) as a third source in the ability "
+            "blend. Backtested on past WCs it DILUTES the FIFA+TM blend, so it's here "
+            "for experimentation only — leave off for the best overlay.",
+        )
     futures_anchor = st.toggle(
         "Anchor champion odds to the futures market", value=True, key="wc_futures",
         help="Blend the simulated CHAMPION probabilities toward the de-vigged "
@@ -1183,6 +1223,7 @@ def _tab_world_cup() -> None:
                 "Use 🔄 Refresh after a match finishes.")
         return
     ability_w = 0.5 if ability_on else 0.0  # modest; >0.5 hurt in the backtest
+    sofa = sofa_on and ability_on  # SofaScore is a source within the ability blend
     try:
         fingerprint = _live_results_fingerprint()  # content key: refit on any change
         played = int(
@@ -1191,7 +1232,8 @@ def _tab_world_cup() -> None:
             ).pipe(lambda d: (d["home_score"] != "").sum())
         )
         host_adv_eff = host_adv if model_label == "Elo" else 0.0
-        sims = _live_wc(model_label, n_sims, anchor, fingerprint, ability_w, host_adv_eff)
+        sims = _live_wc(model_label, n_sims, anchor, fingerprint, ability_w,
+                        host_adv_eff, sofa)
     except Exception as exc:
         st.error(f"Live World Cup pipeline failed: {exc}")
         return
@@ -1201,7 +1243,7 @@ def _tab_world_cup() -> None:
         + (f" · +{host_adv_eff:.0f} Elo host bump (US/CAN/MEX)" if host_adv_eff else "")
     )
     if ability_on:
-        _adj, _src = _live_ability()
+        _adj, _src = _live_ability(sofa)
         if not _adj:
             st.warning(f"Ability overlay unavailable — using pure model. ({_src})")
         elif model_label != "Elo":
