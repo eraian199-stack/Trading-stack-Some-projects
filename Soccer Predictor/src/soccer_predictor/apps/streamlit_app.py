@@ -675,9 +675,10 @@ def _tab_backtest(df: pd.DataFrame, cfg: dict) -> None:
             help="Adds SofaScore club-season player ratings for the season BEFORE each "
             "World Cup (data/sofascore_ratings_<year>.csv, built by "
             "scripts/build_sofascore_overlays.py) as a third source in the ability "
-            "blend. Backtested OOS it DILUTES the FIFA+TM blend (Elo+FIFA+TM @0.5 = "
-            "0.9902 vs +SofaScore @0.5 = 0.9926) — included so you can see that; "
-            "leave off for the best overlay.",
+            "blend. League-adjusted (a 7.5 in a weak league anchors below a 7.5 in a "
+            "strong one). Backtested OOS it still slightly DILUTES the FIFA+TM blend "
+            "(Elo+FIFA+TM @0.5 = 0.9902 vs +SofaScore @0.5 = 0.9921) — included so "
+            "you can see that; leave off for the best overlay.",
         )
     host_on = st.toggle(
         "Host advantage in the bracket sim (backtested, Elo only)", value=False,
@@ -1181,8 +1182,9 @@ def _tab_world_cup() -> None:
             value=False, key="wc_sofa",
             help="Adds SofaScore 2025/26 club-season ratings "
             "(data/sofascore_ratings_2026.csv) as a third source in the ability "
-            "blend. Backtested on past WCs it DILUTES the FIFA+TM blend, so it's here "
-            "for experimentation only — leave off for the best overlay.",
+            "blend, LEAGUE-ADJUSTED (a 7.5 in a weak league anchors below a 7.5 in a "
+            "strong one). Backtested on past WCs it still slightly DILUTES the FIFA+TM "
+            "blend, so it's here for experimentation only — leave off for the best overlay.",
         )
     futures_anchor = st.toggle(
         "Anchor champion odds to the futures market", value=True, key="wc_futures",
