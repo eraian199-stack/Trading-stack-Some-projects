@@ -176,6 +176,15 @@ Five tabs: **🏆 World Cup 2026 (live)**, **Match Predictor**, **Tournament
 Simulator**, **Backtest Lab**, and **Betting Edge Scanner** (model fair odds vs
 market vs edge, with calibration warnings).
 
+The **Match Predictor** tab (national teams) has the same optional **squad-ability
+overlay** as the rest of the app — toggle *"Squad-ability overlay (FIFA +
+Transfermarkt)"* (and optionally *"+ SofaScore club-season ratings"*) to tilt the
+single-fixture 1X2 / score / fair-odds toward current squad ability and watch how
+the prediction shifts. It also carries its own **out-of-sample backtest** (expander):
+plain-Elo log loss / hit rate / Brier vs the no-skill floor over every WC match
+since 1998, plus the plain-vs-ability head-to-head on the clean editions — so you
+can see the predictor's skill and whether the overlay earns its place.
+
 The **Backtest Lab** tab has a World Cup backtest with edition and **model**
 dropdowns (every World Cup back to 1998, or all pooled): it shows the match-level
 metrics against the no-skill floor. The model dropdown offers **Elo** (the

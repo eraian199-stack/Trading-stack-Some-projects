@@ -111,6 +111,21 @@ def fit_model(model_label: str, data_key: str, source_kind: str,
     return model.fit(train.copy())
 
 
+@st.cache_resource(show_spinner="Fitting Elo + squad-ability model...")
+def _match_overlay_model(data_key: str, source_kind: str, source_value: str,
+                         synthetic_kind: str, ability_w: float, sofa: bool):
+    """Elo fit on the loaded data, tilted toward CURRENT squad ability (FIFA +
+    age-adjusted Transfermarkt, optionally + league-adjusted SofaScore). Returns
+    (model, source_label); falls back to plain Elo if no ability source is found."""
+    df = load_data(source_kind, source_value, synthetic_kind)
+    train = schemas.completed_matches(df)
+    adj, label = _live_ability(sofa)
+    if not adj:
+        return MODEL_FACTORIES["Elo"]().fit(train.copy()), ""
+    model = EloGoalsModel(squad_strength=adj, squad_weight=ability_w)
+    return model.fit(train.copy()), label
+
+
 def _data_key(source_kind: str, source_value: str, synthetic_kind: str) -> str:
     return f"{source_kind}|{source_value}|{synthetic_kind}"
 
@@ -203,14 +218,45 @@ def _tab_match(df: pd.DataFrame, cfg: dict) -> None:
         st.info("Pick two different teams.")
         return
 
-    model = fit_model(
-        cfg["model_label"],
-        _data_key(cfg["source_kind"], cfg["source_value"], cfg["synthetic_kind"]),
-        cfg["source_kind"], cfg["source_value"], cfg["synthetic_kind"],
-    )
-    if not isinstance(model, ScorelineModel):
+    # Optional squad-ability overlay (national teams only; Elo engine).
+    overlay_on = sofa = False
+    if intl and cfg["model_label"] == "Elo":
+        overlay_on = st.toggle(
+            "Squad-ability overlay (FIFA + Transfermarkt)", value=False,
+            key="match_ability",
+            help="Tilt Elo toward CURRENT squad ability, blended z-score-wise from "
+            "EA-FC/FIFA overall + age-adjusted Transfermarkt. Backtested to beat "
+            "plain Elo by a hair on past World Cups (see the backtest below).")
+        if overlay_on:
+            sofa = st.checkbox(
+                "↳ also blend SofaScore club-season ratings (league-adjusted)",
+                value=False, key="match_sofa",
+                help="Adds league-adjusted SofaScore club-season ratings as a third "
+                "source. Backtested to slightly dilute FIFA+TM — for experimentation.")
+    ability_w = 0.5 if overlay_on else 0.0
+
+    ov_label = ""
+    if intl and cfg["model_label"] == "Elo" and overlay_on:
+        model, ov_label = _match_overlay_model(
+            _data_key(cfg["source_kind"], cfg["source_value"], cfg["synthetic_kind"]),
+            cfg["source_kind"], cfg["source_value"], cfg["synthetic_kind"],
+            ability_w, sofa)
+    else:
+        model = fit_model(
+            cfg["model_label"],
+            _data_key(cfg["source_kind"], cfg["source_value"], cfg["synthetic_kind"]),
+            cfg["source_kind"], cfg["source_value"], cfg["synthetic_kind"],
+        )
+    # Capability check, NOT isinstance: a model cached by @st.cache_resource is built
+    # from the class object as it was at cache time, so after a hot-reload
+    # isinstance(cached_model, ScorelineModel) is False (the class identity differs)
+    # even though the model is fine. hasattr survives reloads.
+    if not hasattr(model, "score_matrix"):
         st.error("Selected model cannot produce a score matrix.")
         return
+    if ov_label:
+        st.caption(f"⚗️ Squad-ability overlay ON — sources: {ov_label}. "
+                   "Toggle it off to compare.")
 
     bundle = predict_markets(
         model, home, away, context={"neutral_site": bool(neutral)}, ou_line=ou_line
@@ -292,6 +338,50 @@ def _tab_match(df: pd.DataFrame, cfg: dict) -> None:
                        "divergence), not real value.")
         else:
             st.caption("No qualifying edge — the model agrees with the book here.")
+
+    # --- Backtest: how this predictor (and the overlay) scores out-of-sample ----
+    if intl and cfg["model_label"] == "Elo":
+        st.divider()
+        with st.expander("📊 Backtest — how this predictor scores out-of-sample"):
+            st.caption(
+                "Every World Cup finals match since 1998, predicted pre-kickoff with "
+                "the same Elo engine (fit only on results BEFORE each tournament — no "
+                "leakage). 'Hit rate' = how often the highest-probability outcome was "
+                "the actual result."
+            )
+            try:
+                ml = _wc_matchlevel_backtest("All since 1998", "Elo")
+                p, fl = ml["pooled"], ml["floor"]
+                b1, b2, b3 = st.columns(3)
+                b1.metric("Log loss", f"{p['log_loss']:.4f}",
+                          f"{p['log_loss'] - fl['log_loss']:+.4f} vs floor",
+                          delta_color="inverse")
+                b2.metric("Hit rate (top pick correct)", f"{p['accuracy']:.1%}")
+                b3.metric("Brier", f"{p['brier']:.4f}")
+                st.caption(
+                    f"No-skill floor (always predict the base rate): log loss "
+                    f"{fl['log_loss']:.4f} over {ml['n']} matches — the gap is the skill."
+                )
+            except Exception as exc:
+                st.warning(f"Backtest unavailable: {exc}")
+            st.markdown(
+                "**Does the squad-ability overlay help?** Plain Elo vs Elo+ability, "
+                "match-level OOS on the clean editions (2018 & 2022)"
+                + (" · +SofaScore (league-adjusted) blended" if sofa else "") + ":"
+            )
+            try:
+                lb = _wc_ability_leaderboard(False, sofa).rename(
+                    columns={"accuracy": "hit_rate"})
+                st.dataframe(lb.round(4), use_container_width=True)
+                if "elo" in lb.index:
+                    d = float(lb["log_loss"].min() - lb.loc["elo", "log_loss"])
+                    st.caption(
+                        f"Best overlay vs plain Elo: {d:+.4f} log loss "
+                        f"({'helps' if d < 0 else 'no improvement'}). Only two clean "
+                        "editions (FIFA ratings start at 15) — underpowered, exploratory."
+                    )
+            except Exception as exc:
+                st.warning(f"Ability comparison unavailable: {exc}")
 
 
 def _market_for_fixture(home: str, away: str):
@@ -867,7 +957,7 @@ def _tab_betting(df: pd.DataFrame, cfg: dict) -> None:
         _data_key(cfg["source_kind"], cfg["source_value"], cfg["synthetic_kind"]),
         cfg["source_kind"], cfg["source_value"], cfg["synthetic_kind"],
     )
-    if isinstance(model, ScorelineModel):
+    if hasattr(model, "score_matrix"):  # capability check (reload-proof vs isinstance)
         _live_odds_section(
             model, neutral=cfg["source_kind"] == "International (live)"
         )
