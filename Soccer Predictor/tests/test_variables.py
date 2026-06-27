@@ -225,6 +225,27 @@ def test_combine_ability_blends_only_where_present():
     assert abs(out2["A"] - out["A"]) < 1e-9
 
 
+def test_knockout_meeting_probabilities():
+    """Pairwise KO-meeting probabilities are computed from the simulated bracket:
+    the two group winners always contest the single final, so the final-stage
+    meeting probabilities sum to 1 and every meet prob is a valid fraction."""
+    from soccer_predictor.simulation import rules
+    from soccer_predictor.simulation.monte_carlo import knockout_meeting_probabilities
+    from soccer_predictor.models.elo_goals import EloGoalsModel
+    fmt = rules.TournamentFormat(
+        name="t", n_groups=2, teams_per_group=2, advance_per_group=1,
+        bracket=[rules.BracketMatch("F", "1A", "1B", "final")],
+        stage_order=("final",),
+    )
+    groups = {"A": ["Aa", "Ab"], "B": ["Ba", "Bb"]}
+    df = knockout_meeting_probabilities(EloGoalsModel(), fmt, groups, n_simulations=200, seed=1)
+    assert not df.empty
+    assert {"team_a", "team_b", "meet_probability", "likeliest_round", "final_prob"} <= set(df.columns)
+    assert df["meet_probability"].between(0.0, 1.0).all()
+    assert abs(df["final_prob"].sum() - 1.0) < 1e-9   # exactly one final per simulation
+    assert (df["likeliest_round"] == "final").all()
+
+
 def test_third_place_assignment_honours_fixed_slots():
     """Pinned best-third slots (read off the real bracket) are kept exactly, and the
     rest of the assignment stays eligible + a bijection."""

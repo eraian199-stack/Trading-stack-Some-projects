@@ -101,6 +101,62 @@ def monte_carlo_tournament(
     return frame
 
 
+def knockout_meeting_probabilities(
+    model: ScorelineModel,
+    fmt: rules.TournamentFormat,
+    groups: dict[str, list[str]],
+    fixtures: pd.DataFrame | None = None,
+    n_simulations: int = 3000,
+    seed: int = 7,
+    teams: list[str] | None = None,
+    force_third_assignment: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """Probability that each pair of teams MEET in the knockout stage, by round.
+
+    Surfaces the bracket-path interaction that is already baked into the reach
+    probabilities: two strong teams routed into the same quarter collide early and
+    cannot both go deep. Over ``n_simulations`` runs it tallies, for every pair, how
+    often they appear in the same knockout match and at which stage. Restricted to
+    ``teams`` (e.g. the title contenders) when given.
+
+    Returns a long DataFrame: ``team_a, team_b, meet_probability, likeliest_round``
+    plus a ``<stage>_prob`` column per knockout stage, sorted by meet probability.
+    """
+    rng = np.random.default_rng(seed)
+    n = int(n_simulations)
+    tset = {normalize_team_name(t) for t in teams} if teams else None
+    stages = list(fmt.stage_order)
+    pair_stage: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
+    for _ in range(n):
+        res = simulate_tournament_once(
+            model, fmt, groups, rng, fixtures=fixtures,
+            force_third_assignment=force_third_assignment,
+        )
+        for m in res["matches"]:
+            if m.stage == "group" or not m.home_team or not m.away_team:
+                continue
+            a, b = m.home_team, m.away_team
+            if tset is not None and (a not in tset or b not in tset):
+                continue
+            pair_stage[tuple(sorted((a, b)))][m.stage] += 1
+
+    denom = float(n) if n > 0 else 1.0
+    rows: list[dict[str, Any]] = []
+    for (a, b), c in pair_stage.items():
+        row: dict[str, Any] = {
+            "team_a": a, "team_b": b,
+            "meet_probability": sum(c.values()) / denom,
+            "likeliest_round": max(c, key=c.get),
+        }
+        for s in stages:
+            row[f"{s}_prob"] = c.get(s, 0) / denom
+        rows.append(row)
+    frame = pd.DataFrame(rows)
+    if not frame.empty:
+        frame = frame.sort_values("meet_probability", ascending=False).reset_index(drop=True)
+    return frame
+
+
 def monte_carlo_league(
     model: ScorelineModel,
     teams: list[str],

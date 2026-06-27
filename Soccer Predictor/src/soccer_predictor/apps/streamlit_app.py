@@ -1234,6 +1234,26 @@ def _live_wc(
     )
 
 
+@st.cache_data(show_spinner="Computing projected knockout meetings...", ttl=900)
+def _live_meetings(
+    model_label: str, fingerprint: str, ability_w: float, host_adv: float, sofa: bool,
+    third_pins: tuple, teams: tuple, n_sims: int = 3000,
+) -> pd.DataFrame:
+    """Pairwise P(meet in the KO stage) among `teams`, using the same model/overlays
+    as the live sim and the actual-fixture R32 pins."""
+    from ..simulation import rules
+    from ..simulation.monte_carlo import knockout_meeting_probabilities
+    model = _live_model(model_label, fingerprint, ability_w, host_adv, sofa)
+    groups = world_cup.load_groups()
+    world_cup.build_fixtures(_live_history(), groups, extra_results=_live_scores())
+    fixtures = loaders.load_fixtures(str(world_cup.FIXTURES_CSV))
+    return knockout_meeting_probabilities(
+        model, rules.world_cup_2026_format(), groups, fixtures=fixtures,
+        n_simulations=n_sims, teams=list(teams),
+        force_third_assignment=dict(third_pins) or None,
+    )
+
+
 @st.cache_data(show_spinner="Fetching live odds...", ttl=900)
 def _live_odds(sport: str, aggregate: str) -> pd.DataFrame:
     return odds_api.fetch_match_odds(sport=sport, aggregate=aggregate)
@@ -1338,7 +1358,7 @@ def _tab_world_cup() -> None:
             pass
         for fn in (_live_history, _live_scores, _live_results_store,
                    _live_train, _live_ability, _live_model, _live_wc, _live_odds,
-                   _live_outrights, _live_r32_third_pins):
+                   _live_outrights, _live_r32_third_pins, _live_meetings):
             try:
                 fn.clear()
             except Exception:
@@ -1411,6 +1431,40 @@ def _tab_world_cup() -> None:
         "Download full probabilities (CSV)", sims.to_csv(index=False),
         file_name="world_cup_2026_probabilities.csv", mime="text/csv",
     )
+
+    # Bracket-path interaction: which contenders are projected to MEET, and when.
+    if model_label == "Elo" and st.checkbox(
+        "Show projected knockout meetings (bracket paths)", value=False, key="wc_meet",
+        help="How often the title contenders are projected to face each other in the "
+        "knockout stage and in which round. This is the bracket-path effect already "
+        "priced into every probability above — two strong teams drawn into the same "
+        "quarter collide early, so they can't both go deep.",
+    ):
+        try:
+            top = sims.head(12)["team"].tolist()
+            mdf = _live_meetings(
+                model_label, fingerprint, ability_w, host_adv_eff, sofa,
+                tuple(sorted(third_pins.items())), tuple(top))
+            if mdf.empty:
+                st.info("No projected meetings among the top teams.")
+            else:
+                view = mdf.head(15).copy()
+                view["meet_probability"] = (view["meet_probability"] * 100).round(1)
+                rounds = {"round_of_32": "R32", "round_of_16": "R16",
+                          "quarterfinal": "QF", "semifinal": "SF", "final": "Final"}
+                view["likeliest_round"] = view["likeliest_round"].map(lambda s: rounds.get(s, s))
+                st.dataframe(
+                    view[["team_a", "team_b", "meet_probability", "likeliest_round"]]
+                    .rename(columns={"meet_probability": "meet %", "likeliest_round": "likeliest round"}),
+                    use_container_width=True, hide_index=True,
+                )
+                st.caption(
+                    "Read: e.g. two contenders shown meeting mostly in the R16/QF are on "
+                    "a collision path — the deeper-stage probabilities above already "
+                    "account for it."
+                )
+        except Exception as exc:
+            st.warning(f"Meeting projection unavailable: {exc}")
 
 
 def _live_odds_section(model: ScorelineModel, neutral: bool) -> None:
