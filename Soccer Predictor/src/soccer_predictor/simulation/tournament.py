@@ -32,11 +32,13 @@ def simulate_tournament_once(
     groups: dict[str, list[str]],
     rng: np.random.Generator,
     fixtures: pd.DataFrame | None = None,
+    force_third_assignment: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Play one full tournament and return its artefacts.
 
     Returns ``{standings, slot_map, third_assignment, reached, matches}`` where
-    ``matches`` concatenates the group and knockout games.
+    ``matches`` concatenates the group and knockout games. ``force_third_assignment``
+    pins R32 best-third slots known from the real published bracket.
     """
     standings, slot_map, third_assignment, group_matches = simulate_group_stage(
         model,
@@ -46,6 +48,7 @@ def simulate_tournament_once(
         tiebreakers=fmt.group_tiebreakers,
         n_best_third=fmt.n_best_third,
         neutral=True,
+        force_third_assignment=force_third_assignment,
     )
     reached, knockout_matches = simulate_knockout(
         model, fmt, slot_map, third_assignment, rng
@@ -66,6 +69,7 @@ def simulate_tournament(
     n_simulations: int = 5000,
     seed: int = 7,
     fmt: rules.TournamentFormat | None = None,
+    force_third_assignment: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     """Monte-Carlo a whole tournament and return per-team reach probabilities.
 
@@ -87,4 +91,5 @@ def simulate_tournament(
         fixtures=fixtures,
         n_simulations=n_simulations,
         seed=seed,
+        force_third_assignment=force_third_assignment,
     )

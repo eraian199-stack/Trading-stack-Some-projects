@@ -34,6 +34,7 @@ def monte_carlo_tournament(
     n_simulations: int = 5000,
     seed: int = 7,
     progress: Callable[[int, int], None] | None = None,
+    force_third_assignment: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     """Aggregate N tournament runs into per-team reach probabilities.
 
@@ -59,7 +60,10 @@ def monte_carlo_tournament(
     group_win_counts: Counter[str] = Counter()
 
     for i in range(n_simulations):
-        result = simulate_tournament_once(model, fmt, groups, rng, fixtures=fixtures)
+        result = simulate_tournament_once(
+            model, fmt, groups, rng, fixtures=fixtures,
+            force_third_assignment=force_third_assignment,
+        )
         reached = result["reached"]
         slot_map = result["slot_map"]
 

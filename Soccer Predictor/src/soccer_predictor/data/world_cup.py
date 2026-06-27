@@ -481,6 +481,69 @@ def build_fixtures(
     return fixtures
 
 
+def _has_score(hs: object, as_: object) -> bool:
+    return (hs is not None and as_ is not None and not pd.isna(hs) and not pd.isna(as_)
+            and str(hs).strip() != "" and str(as_).strip() != "")
+
+
+def complete_groups(
+    fixtures: pd.DataFrame, groups: dict[str, list[str]] | None = None
+) -> set[str]:
+    """Group letters whose every group game already has a score in ``fixtures``."""
+    groups = groups or load_groups()
+    need = {str(g).strip().upper(): len(list(combinations(teams, 2)))
+            for g, teams in groups.items()}
+    played: dict[str, int] = defaultdict(int)
+    for r in fixtures.itertuples(index=False):
+        g = str(getattr(r, "group", "")).strip().upper()
+        if g and _has_score(getattr(r, "home_score", None), getattr(r, "away_score", None)):
+            played[g] += 1
+    return {g for g, n in need.items() if played.get(g, 0) >= n}
+
+
+def live_third_assignment(
+    slot_map: dict[str, str],
+    complete: set[str],
+    ko_fixtures: list[tuple[str, str]],
+) -> dict[str, str]:
+    """Pin best-third R32 slots from the ACTUAL published knockout fixtures.
+
+    ``slot_map`` is ``{"1A": team, "2A": team, "3A": team, ...}`` (e.g. from
+    ``simulate_group_stage`` on the locked fixtures); ``complete`` is the set of
+    groups whose standings are final (only those are trusted); ``ko_fixtures`` is
+    the list of (home, away) Round-of-32 pairings from the live odds feed.
+
+    Returns ``{r32_match_id: group_letter}`` for every best-third slot we can read
+    off a real fixture -- e.g. a game between a group winner (``1I``) and a
+    third-placed team (``3F``) pins that match's best-third group to F. Slots not
+    yet decided are simply omitted (the solver fills them). No fabricated table:
+    the assignment is observed from the actual bracket as it is published.
+    """
+    from ..simulation import rules
+
+    team_slot: dict[str, str] = {}
+    for code, team in slot_map.items():
+        if code[1:] in complete and team:
+            team_slot[normalize_team_name(team)] = code
+    elig = rules.wc2026_third_slot_rules()                 # match_id -> [groups]
+    home_code = {m: h for m, h, _a in rules.WC2026_R32}    # match_id -> home slot code
+    winner_to_match = {home_code[m]: m for m in elig}      # '1E' -> 'M74', ...
+
+    out: dict[str, str] = {}
+    for home, away in ko_fixtures:
+        a = team_slot.get(normalize_team_name(home))
+        b = team_slot.get(normalize_team_name(away))
+        for win_code, third_code in ((a, b), (b, a)):
+            if (win_code in winner_to_match and third_code
+                    and third_code.startswith("3")):
+                m = winner_to_match[win_code]
+                grp = third_code[1:]
+                if grp in elig[m]:
+                    out[m] = grp
+                break
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # One-call live simulation
 # --------------------------------------------------------------------------- #

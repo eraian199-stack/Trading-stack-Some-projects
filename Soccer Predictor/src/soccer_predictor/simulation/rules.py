@@ -348,31 +348,47 @@ def wc2026_third_slot_rules() -> dict[str, list[str]]:
     return rules
 
 
-def wc2026_third_place_assignment(qualified_groups: list[str]) -> dict[str, str]:
+def wc2026_third_place_assignment(
+    qualified_groups: list[str], fixed: dict[str, str] | None = None
+) -> dict[str, str]:
     """Assign the 8 best-third groups to R32 best-third slots.
 
     FIFA publishes a fixed allocation matrix (Annex C) keyed on *which* group
-    letters qualify. This is a constraint-satisfaction approximation: it finds a
-    valid assignment respecting each slot's eligible-group list. It is correct in
-    that every assigned group is eligible for its slot and each group is used
-    once; it is approximate in that it does not reproduce FIFA's exact published
-    mapping for every one of the 495 combinations.
+    letters qualify. All 495 combinations admit MANY eligibility-valid matchings
+    (e.g. groups A-H -> 29), so eligibility alone does not pin FIFA's published
+    choice; absent the official matrix this finds *a* valid assignment.
+
+    ``fixed`` lets the caller pin specific ``{match_id: group}`` slots that are
+    KNOWN to be correct -- e.g. read off the actual published Round-of-32 fixtures
+    once a group has finished (see ``world_cup.live_third_assignment``). Pinned
+    slots are honoured exactly (when eligible + qualified) and the remaining slots
+    are solved around them, so as the real bracket fills in, the assignment
+    converges to reality instead of the approximation.
     """
-    rules = wc2026_third_slot_rules()
-    qualified = list(qualified_groups)
-    qualified_set = set(qualified)
-    ordered_slots = sorted(
-        rules,
-        key=lambda slot: len([g for g in rules[slot] if g in qualified_set]),
-    )
+    slot_rules = wc2026_third_slot_rules()
+    qualified_set = set(qualified_groups)
     assignment: dict[str, str] = {}
     used: set[str] = set()
 
+    # Seed caller-pinned slots that are valid (eligible group, qualified, free).
+    for slot, grp in (fixed or {}).items():
+        if (slot in slot_rules and grp in qualified_set
+                and grp in slot_rules[slot] and grp not in used):
+            assignment[slot] = grp
+            used.add(grp)
+
+    remaining_slots = sorted(
+        (s for s in slot_rules if s not in assignment),
+        key=lambda slot: len(
+            [g for g in slot_rules[slot] if g in qualified_set and g not in used]
+        ),
+    )
+
     def backtrack(pos: int) -> bool:
-        if pos == len(ordered_slots):
+        if pos == len(remaining_slots):
             return True
-        slot = ordered_slots[pos]
-        for g in rules[slot]:
+        slot = remaining_slots[pos]
+        for g in slot_rules[slot]:
             if g in qualified_set and g not in used:
                 assignment[slot] = g
                 used.add(g)
@@ -383,8 +399,8 @@ def wc2026_third_place_assignment(qualified_groups: list[str]) -> dict[str, str]
         return False
 
     if not backtrack(0):
-        remaining = [g for g in qualified if g not in used]
-        for slot in ordered_slots:
+        remaining = [g for g in qualified_groups if g not in used]
+        for slot in remaining_slots:
             if slot not in assignment and remaining:
                 assignment[slot] = remaining.pop(0)
     return assignment

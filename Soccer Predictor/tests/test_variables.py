@@ -225,6 +225,34 @@ def test_combine_ability_blends_only_where_present():
     assert abs(out2["A"] - out["A"]) < 1e-9
 
 
+def test_third_place_assignment_honours_fixed_slots():
+    """Pinned best-third slots (read off the real bracket) are kept exactly, and the
+    rest of the assignment stays eligible + a bijection."""
+    from soccer_predictor.simulation import rules
+    qualified = ["A", "B", "C", "D", "E", "F", "G", "H"]
+    elig = rules.wc2026_third_slot_rules()
+    asn = rules.wc2026_third_place_assignment(qualified, fixed={"M77": "F"})
+    assert asn["M77"] == "F"                                   # pin honoured
+    assert all(g in elig[m] for m, g in asn.items())           # every slot eligible
+    assert sorted(asn.values()) == sorted(qualified)           # each group used once
+    # an ineligible pin is ignored, not blindly trusted
+    asn2 = rules.wc2026_third_place_assignment(qualified, fixed={"M74": "G"})  # M74=A/B/C/D/F
+    assert asn2["M74"] != "G"
+
+
+def test_live_third_assignment_reads_actual_fixtures():
+    """A real R32 fixture between a group winner (1I) and a third (3F) pins that
+    match's best-third group to F; undecided/group fixtures are ignored."""
+    from soccer_predictor.data import world_cup
+    slot_map = {"1I": "France", "3F": "Sweden", "1A": "Mexico", "2B": "Croatia"}
+    complete = {"I", "F", "A", "B"}
+    pins = world_cup.live_third_assignment(
+        slot_map, complete, [("France", "Sweden"), ("Mexico", "Croatia")])
+    assert pins == {"M77": "F"}                                # M77 = 1I vs 3[C/D/F/G/H]
+    # a team from an incomplete group is not trusted
+    assert world_cup.live_third_assignment(slot_map, {"I"}, [("France", "Sweden")]) == {}
+
+
 def test_wc_elo_factory_uncached_callers_cached():
     """Regression: _wc_elo_factory returns a closure, so it must NOT be wrapped by
     @st.cache_data (the closure can't be pickled when Streamlit writes the cache).

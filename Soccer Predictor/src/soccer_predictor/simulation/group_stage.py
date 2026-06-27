@@ -36,6 +36,7 @@ def simulate_group_stage(
     tiebreakers: tuple[str, ...] = rules.FIFA_GROUP_TIEBREAKERS,
     n_best_third: int = 0,
     neutral: bool = True,
+    force_third_assignment: dict[str, str] | None = None,
 ) -> tuple[
     dict[str, list[dict[str, Any]]],
     dict[str, str],
@@ -132,8 +133,16 @@ def simulate_group_stage(
             third_rows, [], tiebreakers=tiebreakers, rng=rng
         )
         qualified_third_groups = [r["group"] for r in ranked_thirds[:n_best_third]]
+        # Pin slots known from the actual published R32 fixtures, but only for
+        # groups that actually qualified in THIS run -- so counterfactual sims
+        # (a different set of thirds advancing) fall back to the solver, while the
+        # realised/decided scenario uses the real bracket.
+        fixed = None
+        if force_third_assignment:
+            qset = set(qualified_third_groups)
+            fixed = {m: g for m, g in force_third_assignment.items() if g in qset}
         third_assignment = rules.wc2026_third_place_assignment(
-            qualified_third_groups
+            qualified_third_groups, fixed=fixed
         )
 
     return standings, slot_map, third_assignment, matches

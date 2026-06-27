@@ -1175,10 +1175,42 @@ def _live_model(
     return factory().fit(_live_train().copy())
 
 
+@st.cache_data(show_spinner="Reading actual R32 fixtures...", ttl=900)
+def _live_r32_third_pins(fingerprint: str) -> dict:
+    """{r32_match_id: group} best-third slots read off the ACTUAL published R32
+    fixtures (live odds feed) + the locked, completed group standings. Empty until
+    real KO fixtures appear; grows as groups finalise. So the simulated bracket
+    matches reality instead of the solver's guess once the draw is known."""
+    del fingerprint  # cache key only
+    try:
+        import numpy as np
+        from ..simulation.group_stage import simulate_group_stage
+        groups = world_cup.load_groups()
+        world_cup.build_fixtures(_live_history(), groups, extra_results=_live_scores())
+        fixtures = loaders.load_fixtures(str(world_cup.FIXTURES_CSV))
+        odds = _live_odds(odds_api.WORLD_CUP_SPORT, "avg")
+        if odds.empty:
+            return {}
+        grp_pairs = world_cup.group_pair_keys(groups)
+        ko = [(r.home_team, r.away_team) for r in odds.itertuples(index=False)
+              if world_cup._pair_key(r.home_team, r.away_team) not in grp_pairs]
+        if not ko:
+            return {}
+        # Completed groups' standings are model-independent, so a bare Elo suffices.
+        _, slot_map, _, _ = simulate_group_stage(
+            EloGoalsModel(), groups, np.random.default_rng(0),
+            fixtures=fixtures, n_best_third=8)
+        complete = world_cup.complete_groups(fixtures, groups)
+        return world_cup.live_third_assignment(slot_map, complete, ko)
+    except Exception:
+        return {}
+
+
 @st.cache_data(show_spinner="Simulating World Cup 2026...", ttl=900)
 def _live_wc(
     model_label: str, n_sims: int, anchor: bool, fingerprint: str,
     ability_w: float = 0.0, host_adv: float = 0.0, sofa: bool = False,
+    third_pins: tuple = (),
 ) -> pd.DataFrame:
     model = _live_model(model_label, fingerprint, ability_w, host_adv, sofa)
     groups = world_cup.load_groups()
@@ -1196,7 +1228,10 @@ def _live_wc(
             pass  # no odds/key -> pure model
     from ..simulation.tournament import simulate_tournament
 
-    return simulate_tournament(model, groups, fixtures=fixtures, n_simulations=n_sims)
+    return simulate_tournament(
+        model, groups, fixtures=fixtures, n_simulations=n_sims,
+        force_third_assignment=dict(third_pins) or None,
+    )
 
 
 @st.cache_data(show_spinner="Fetching live odds...", ttl=900)
@@ -1303,7 +1338,7 @@ def _tab_world_cup() -> None:
             pass
         for fn in (_live_history, _live_scores, _live_results_store,
                    _live_train, _live_ability, _live_model, _live_wc, _live_odds,
-                   _live_outrights):
+                   _live_outrights, _live_r32_third_pins):
             try:
                 fn.clear()
             except Exception:
@@ -1324,8 +1359,9 @@ def _tab_world_cup() -> None:
             ).pipe(lambda d: (d["home_score"] != "").sum())
         )
         host_adv_eff = host_adv if model_label == "Elo" else 0.0
+        third_pins = _live_r32_third_pins(fingerprint)  # actual R32 slots from real fixtures
         sims = _live_wc(model_label, n_sims, anchor, fingerprint, ability_w,
-                        host_adv_eff, sofa)
+                        host_adv_eff, sofa, tuple(sorted(third_pins.items())))
     except Exception as exc:
         st.error(f"Live World Cup pipeline failed: {exc}")
         return
@@ -1333,6 +1369,8 @@ def _tab_world_cup() -> None:
         f"{played}/72 group games played and locked in (incl. live results)"
         + (" · anchored to live market odds" if anchor else " · pure model (no anchor)")
         + (f" · +{host_adv_eff:.0f} Elo host bump (US/CAN/MEX)" if host_adv_eff else "")
+        + (f" · {len(third_pins)}/8 R32 best-third slots set from the actual draw"
+           if third_pins else "")
     )
     if ability_on:
         _adj, _src = _live_ability(sofa)
