@@ -54,6 +54,7 @@ def simulate_knockout(
     slot_map: dict[str, str],
     third_assignment: dict[str, str],
     rng: np.random.Generator,
+    known_results: dict[frozenset, tuple] | None = None,
 ) -> tuple[dict[str, list[str]], list[SimulatedMatch]]:
     """Play `fmt.bracket` to completion.
 
@@ -65,6 +66,12 @@ def simulate_knockout(
     Knockout matches are neutral (international tournament) and always resolved:
     `simulate_match(..., knockout=True, tie=fmt.knockout)` adds ET / penalties so
     no draw survives.
+
+    ``known_results`` locks games that have ACTUALLY been played:
+    ``{frozenset({team_a, team_b}): (winner, winner_goals, loser_goals)}``. A
+    bracket match whose two resolved teams are in ``known_results`` uses the real
+    outcome instead of a fresh sim, so eliminated teams drop to 0 and the survivors'
+    probabilities condition on what already happened.
     """
     winners: dict[str, str] = {}
     reached: dict[str, list[str]] = {stage: [] for stage in fmt.stage_order}
@@ -89,7 +96,17 @@ def simulate_knockout(
             )
             reached[stage].append(home)
             reached[stage].append(away)
-            if fmt.knockout.two_leg:
+            actual = known_results.get(frozenset((home, away))) if known_results else None
+            if actual is not None:
+                # Lock in a game already played: use the real winner + score.
+                win, wg, lg = actual
+                win = win if win in (home, away) else home
+                hs, as_ = (wg, lg) if home == win else (lg, wg)
+                match = SimulatedMatch(
+                    match_id=bm.match_id, home_team=home, away_team=away,
+                    home_score=hs, away_score=as_, winner=win, stage=stage,
+                )
+            elif fmt.knockout.two_leg:
                 # Home-and-away tie (e.g. Champions League): each side hosts a
                 # leg, decided on aggregate (+ away goals / ET / penalties).
                 match = simulate_two_leg_tie(

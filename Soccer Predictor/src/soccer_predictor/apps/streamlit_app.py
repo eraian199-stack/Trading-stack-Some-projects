@@ -1096,10 +1096,15 @@ def _live_results_fingerprint() -> str:
 
 
 @st.cache_data(show_spinner="Assembling live training data...", ttl=900)
-def _live_train() -> pd.DataFrame:
-    """Completed history + every WC game played so far (so the model sees them)."""
+def _live_train(as_of: str = "") -> pd.DataFrame:
+    """Completed history + every WC game played so far (so the model sees them).
+    ``as_of`` (ISO date) rewinds the training to games on/before that day, for the
+    "probabilities as of an earlier point" view."""
     _live_results_store()  # persist before the trainer reads the ledger
-    return world_cup.live_training_frame(use_odds_api_scores=True)
+    df = world_cup.live_training_frame(use_odds_api_scores=True)
+    if as_of:
+        df = df[pd.to_datetime(df["date"], errors="coerce") <= pd.Timestamp(as_of)]
+    return df
 
 
 @st.cache_data(show_spinner="Building squad-ability overlay...", ttl=3600)
@@ -1155,9 +1160,10 @@ def _live_ability(sofa: bool = False) -> tuple[dict, str]:
 @st.cache_resource(show_spinner="Fitting model on real history...")
 def _live_model(
     model_label: str, fingerprint: str, ability_w: float = 0.0, host_adv: float = 0.0,
-    sofa: bool = False,
+    sofa: bool = False, as_of: str = "",
 ) -> object:
     del fingerprint  # cache key only; new/changed results -> new key -> refit
+    train = _live_train(as_of)  # as_of rewinds the fit for the time-machine view
     factory = MODEL_FACTORIES[model_label]
     # Only the Elo engine takes the squad overlay / host bump; both feed the
     # all-neutral simulation, where 2026's hosts (US/Canada/Mexico) get no edge
@@ -1171,12 +1177,65 @@ def _live_model(
         if host_adv > 0:
             kwargs.update(hosts=wc_backtest.WC_HOSTS.get(2026, ()), host_advantage=host_adv)
         if kwargs:
-            return EloGoalsModel(**kwargs).fit(_live_train().copy())
-    return factory().fit(_live_train().copy())
+            return EloGoalsModel(**kwargs).fit(train.copy())
+    return factory().fit(train.copy())
+
+
+def _asof_conditioned(as_of: str):
+    """(groups, fixtures, known_ko_results) locked to games on/before ``as_of``
+    (all completed WC games when as_of is empty). Uses build_fixtures(out=None) so
+    a rewound view never overwrites the shared live fixtures file."""
+    groups = world_cup.load_groups()
+    hist, sc = _live_history(), _live_scores()
+    if as_of:
+        cutoff = pd.Timestamp(as_of)
+        hist = hist[pd.to_datetime(hist["date"], errors="coerce") <= cutoff]
+        if sc is not None and len(sc):
+            sc = sc[pd.to_datetime(sc["date"], errors="coerce") <= cutoff]
+    fixtures = world_cup.build_fixtures(hist, groups, out=None, extra_results=sc)
+    known = world_cup.completed_ko_results(hist, sc, groups)
+    return groups, fixtures, known
+
+
+@st.cache_data(show_spinner="Finding tournament checkpoints...", ttl=900)
+def _asof_options(fingerprint: str) -> list:
+    """(label, as_of) checkpoints for the time-machine dropdown: Now, each earlier
+    completed WC matchday, the end of the group stage, and pre-tournament."""
+    del fingerprint
+    opts: list = [("Now (latest results)", "")]
+    try:
+        groups = world_cup.load_groups()
+        grp = world_cup.group_pair_keys(groups)
+        hist, sc = _live_history(), _live_scores()
+        rows = []
+        for f in (world_cup.wc2026_matches(hist), sc):
+            if f is None or len(f) == 0:
+                continue
+            for r in f.itertuples(index=False):
+                h, a = getattr(r, "home_team", ""), getattr(r, "away_team", "")
+                if world_cup._has_score(getattr(r, "home_score", None), getattr(r, "away_score", None)):
+                    dt = pd.to_datetime(getattr(r, "date", None), errors="coerce")
+                    if pd.notna(dt):
+                        rows.append((dt.normalize(), world_cup._pair_key(h, a) in grp))
+        if not rows:
+            return opts
+        df = pd.DataFrame(rows, columns=["dt", "is_group"]).sort_values("dt")
+        days = list(df["dt"].unique())
+        group_end = df[df["is_group"]]["dt"].max() if df["is_group"].any() else None
+        for dt in reversed(days[:-1]):  # every earlier matchday (latest == "Now")
+            ds = pd.Timestamp(dt).strftime("%Y-%m-%d")
+            n = int((df["dt"] <= dt).sum())
+            tag = " · end of group stage" if group_end is not None and dt == group_end else ""
+            opts.append((f"As of {ds} ({n} games in){tag}", ds))
+        start = (pd.Timestamp(days[0]) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        opts.append(("Before the tournament (pre-tournament projection)", start))
+    except Exception:
+        pass
+    return opts
 
 
 @st.cache_data(show_spinner="Reading actual R32 fixtures...", ttl=900)
-def _live_r32_third_pins(fingerprint: str) -> dict:
+def _live_r32_third_pins(fingerprint: str, as_of: str = "") -> dict:
     """{r32_match_id: group} best-third slots read off the ACTUAL published R32
     fixtures (live odds feed) + the locked, completed group standings. Empty until
     real KO fixtures appear; grows as groups finalise. So the simulated bracket
@@ -1185,9 +1244,7 @@ def _live_r32_third_pins(fingerprint: str) -> dict:
     try:
         import numpy as np
         from ..simulation.group_stage import simulate_group_stage
-        groups = world_cup.load_groups()
-        world_cup.build_fixtures(_live_history(), groups, extra_results=_live_scores())
-        fixtures = loaders.load_fixtures(str(world_cup.FIXTURES_CSV))
+        groups, fixtures, _ = _asof_conditioned(as_of)
         odds = _live_odds(odds_api.WORLD_CUP_SPORT, "avg")
         if odds.empty:
             return {}
@@ -1210,14 +1267,11 @@ def _live_r32_third_pins(fingerprint: str) -> dict:
 def _live_wc(
     model_label: str, n_sims: int, anchor: bool, fingerprint: str,
     ability_w: float = 0.0, host_adv: float = 0.0, sofa: bool = False,
-    third_pins: tuple = (),
+    third_pins: tuple = (), as_of: str = "",
 ) -> pd.DataFrame:
-    model = _live_model(model_label, fingerprint, ability_w, host_adv, sofa)
-    groups = world_cup.load_groups()
-    # Lock in games already played (history + live Odds-API results + ledger).
-    world_cup.build_fixtures(_live_history(), groups, extra_results=_live_scores())
-    fixtures = loaders.load_fixtures(str(world_cup.FIXTURES_CSV))
-    if anchor:
+    model = _live_model(model_label, fingerprint, ability_w, host_adv, sofa, as_of)
+    groups, fixtures, known = _asof_conditioned(as_of)
+    if anchor and not as_of:  # current market odds are anachronistic for a past cutoff
         from ..models.market_anchor import MarketAnchoredModel
 
         try:
@@ -1230,6 +1284,7 @@ def _live_wc(
 
     return simulate_tournament(
         model, groups, fixtures=fixtures, n_simulations=n_sims,
+        known_results=known or None,
         force_third_assignment=dict(third_pins) or None,
     )
 
@@ -1237,20 +1292,19 @@ def _live_wc(
 @st.cache_data(show_spinner="Computing projected knockout meetings...", ttl=900)
 def _live_meetings(
     model_label: str, fingerprint: str, ability_w: float, host_adv: float, sofa: bool,
-    third_pins: tuple, teams: tuple, n_sims: int = 3000,
+    third_pins: tuple, teams: tuple, as_of: str = "", n_sims: int = 3000,
 ) -> pd.DataFrame:
-    """Pairwise P(meet in the KO stage) among `teams`, using the same model/overlays
-    as the live sim and the actual-fixture R32 pins."""
+    """Pairwise P(meet in the KO stage) among `teams`, using the same model/overlays,
+    the actual-fixture R32 pins, and the as-of conditioning (locked results)."""
     from ..simulation import rules
     from ..simulation.monte_carlo import knockout_meeting_probabilities
-    model = _live_model(model_label, fingerprint, ability_w, host_adv, sofa)
-    groups = world_cup.load_groups()
-    world_cup.build_fixtures(_live_history(), groups, extra_results=_live_scores())
-    fixtures = loaders.load_fixtures(str(world_cup.FIXTURES_CSV))
+    model = _live_model(model_label, fingerprint, ability_w, host_adv, sofa, as_of)
+    groups, fixtures, known = _asof_conditioned(as_of)
     return knockout_meeting_probabilities(
         model, rules.world_cup_2026_format(), groups, fixtures=fixtures,
         n_simulations=n_sims, teams=list(teams),
         force_third_assignment=dict(third_pins) or None,
+        known_results=known or None,
     )
 
 
@@ -1358,7 +1412,8 @@ def _tab_world_cup() -> None:
             pass
         for fn in (_live_history, _live_scores, _live_results_store,
                    _live_train, _live_ability, _live_model, _live_wc, _live_odds,
-                   _live_outrights, _live_r32_third_pins, _live_meetings):
+                   _live_outrights, _live_r32_third_pins, _live_meetings,
+                   _asof_options):
             try:
                 fn.clear()
             except Exception:
@@ -1373,18 +1428,32 @@ def _tab_world_cup() -> None:
     sofa = sofa_on and ability_on  # SofaScore is a source within the ability blend
     try:
         fingerprint = _live_results_fingerprint()  # content key: refit on any change
+        asof_opts = _asof_options(fingerprint)  # time-machine checkpoints
+        asof_labels = [o[0] for o in asof_opts]
+        pick = st.selectbox(
+            "Probabilities as of", asof_labels, index=0, key="wc_asof",
+            help="Rewind the tournament: recompute every probability conditioned ONLY "
+            "on games played on/before the chosen checkpoint — the model is refit and "
+            "the bracket re-simulated from there. 'Now' uses all results; pick an "
+            "earlier day to see what the probabilities were before those games.",
+        )
+        as_of = asof_opts[asof_labels.index(pick)][1]
         played = int(
             world_cup.build_fixtures(
                 _live_history(), world_cup.load_groups(), extra_results=_live_scores()
             ).pipe(lambda d: (d["home_score"] != "").sum())
         )
         host_adv_eff = host_adv if model_label == "Elo" else 0.0
-        third_pins = _live_r32_third_pins(fingerprint)  # actual R32 slots from real fixtures
+        third_pins = _live_r32_third_pins(fingerprint, as_of)  # actual R32 slots
         sims = _live_wc(model_label, n_sims, anchor, fingerprint, ability_w,
-                        host_adv_eff, sofa, tuple(sorted(third_pins.items())))
+                        host_adv_eff, sofa, tuple(sorted(third_pins.items())), as_of)
     except Exception as exc:
         st.error(f"Live World Cup pipeline failed: {exc}")
         return
+    if as_of:
+        st.info(f"⏪ Rewound — **{pick}**. Every probability below is conditioned only "
+                "on games up to that point (model refit, bracket re-simulated); the "
+                "live market anchor is off for past checkpoints.")
     st.caption(
         f"{played}/72 group games played and locked in (incl. live results)"
         + (" · anchored to live market odds" if anchor else " · pure model (no anchor)")
@@ -1444,7 +1513,7 @@ def _tab_world_cup() -> None:
             top = sims.head(12)["team"].tolist()
             mdf = _live_meetings(
                 model_label, fingerprint, ability_w, host_adv_eff, sofa,
-                tuple(sorted(third_pins.items())), tuple(top))
+                tuple(sorted(third_pins.items())), tuple(top), as_of)
             if mdf.empty:
                 st.info("No projected meetings among the top teams.")
             else:

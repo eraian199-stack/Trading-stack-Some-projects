@@ -544,6 +544,43 @@ def live_third_assignment(
     return out
 
 
+def completed_ko_results(
+    history: pd.DataFrame,
+    scores: pd.DataFrame | None = None,
+    groups: dict[str, list[str]] | None = None,
+) -> dict[frozenset, tuple]:
+    """Completed WC KNOCKOUT games as ``{frozenset({home, away}): (winner, wg, lg)}``.
+
+    A WC match that is not one of the 72 group pairings is a knockout game; a
+    decisive score identifies the winner (draws are skipped -- a shootout winner
+    isn't derivable from the reported score alone). Used to LOCK games already
+    played so eliminated teams drop to 0 and survivors condition on what happened.
+    """
+    groups = groups or load_groups()
+    grp = group_pair_keys(groups)
+    out: dict[frozenset, tuple] = {}
+    for frame in (wc2026_matches(history), scores):
+        if frame is None or len(frame) == 0:
+            continue
+        for r in frame.itertuples(index=False):
+            h = normalize_team_name(getattr(r, "home_team", ""))
+            a = normalize_team_name(getattr(r, "away_team", ""))
+            hs, as_ = getattr(r, "home_score", None), getattr(r, "away_score", None)
+            if not h or not a or not _has_score(hs, as_):
+                continue
+            if _pair_key(h, a) in grp:
+                continue  # group game
+            try:
+                hs, as_ = int(float(hs)), int(float(as_))
+            except (TypeError, ValueError):
+                continue
+            if hs == as_:
+                continue  # shootout -- winner not derivable from the score
+            winner = h if hs > as_ else a
+            out[frozenset((h, a))] = (winner, max(hs, as_), min(hs, as_))
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # One-call live simulation
 # --------------------------------------------------------------------------- #

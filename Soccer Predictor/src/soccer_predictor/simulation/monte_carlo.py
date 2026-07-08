@@ -35,6 +35,7 @@ def monte_carlo_tournament(
     seed: int = 7,
     progress: Callable[[int, int], None] | None = None,
     force_third_assignment: dict[str, str] | None = None,
+    known_results: dict[frozenset, tuple] | None = None,
 ) -> pd.DataFrame:
     """Aggregate N tournament runs into per-team reach probabilities.
 
@@ -63,6 +64,7 @@ def monte_carlo_tournament(
         result = simulate_tournament_once(
             model, fmt, groups, rng, fixtures=fixtures,
             force_third_assignment=force_third_assignment,
+            known_results=known_results,
         )
         reached = result["reached"]
         slot_map = result["slot_map"]
@@ -110,6 +112,7 @@ def knockout_meeting_probabilities(
     seed: int = 7,
     teams: list[str] | None = None,
     force_third_assignment: dict[str, str] | None = None,
+    known_results: dict[frozenset, tuple] | None = None,
 ) -> pd.DataFrame:
     """Probability that each pair of teams MEET in the knockout stage, by round.
 
@@ -131,6 +134,7 @@ def knockout_meeting_probabilities(
         res = simulate_tournament_once(
             model, fmt, groups, rng, fixtures=fixtures,
             force_third_assignment=force_third_assignment,
+            known_results=known_results,
         )
         for m in res["matches"]:
             if m.stage == "group" or not m.home_team or not m.away_team:

@@ -225,6 +225,43 @@ def test_combine_ability_blends_only_where_present():
     assert abs(out2["A"] - out["A"]) < 1e-9
 
 
+def test_known_results_lock_knockout_and_zero_eliminated():
+    """Locking an actual knockout result makes the winner champion in 100% of runs
+    and the loser 0% -- i.e. an eliminated team drops to zero."""
+    from soccer_predictor.simulation import rules
+    from soccer_predictor.simulation.tournament import simulate_tournament
+    from soccer_predictor.models.elo_goals import EloGoalsModel
+    fmt = rules.TournamentFormat(
+        name="t", n_groups=2, teams_per_group=1, advance_per_group=1,
+        bracket=[rules.BracketMatch("F", "1A", "1B", "final")], stage_order=("final",),
+    )
+    groups = {"A": ["Brazil"], "B": ["Argentina"]}
+    known = {frozenset({"Brazil", "Argentina"}): ("Argentina", 2, 0)}
+    sims = simulate_tournament(EloGoalsModel(), groups, n_simulations=50, fmt=fmt,
+                               known_results=known)
+    champ = dict(zip(sims["team"], sims["champion_probability"]))
+    assert champ["Argentina"] == 1.0
+    assert champ["Brazil"] == 0.0
+
+
+def test_completed_ko_results_skips_group_and_draws():
+    """Only decisive non-group WC games become locked knockout results."""
+    from soccer_predictor.data import world_cup
+    groups = {"A": ["France", "Sweden"], "B": ["Germany", "Spain"]}  # group pairs within
+    scores = pd.DataFrame([
+        {"home_team": "France", "away_team": "Germany", "home_score": 2, "away_score": 1,
+         "date": "2026-07-01"},   # KO (cross-group) -> France wins
+        {"home_team": "France", "away_team": "Sweden", "home_score": 1, "away_score": 0,
+         "date": "2026-06-20"},   # group pair -> skipped
+        {"home_team": "Spain", "away_team": "Brazil", "home_score": 1, "away_score": 1,
+         "date": "2026-07-01"},   # draw (shootout) -> skipped
+    ])
+    empty = pd.DataFrame(columns=["date", "home_team", "away_team", "home_score",
+                                  "away_score", "competition"])
+    res = world_cup.completed_ko_results(empty, scores, groups)
+    assert res == {frozenset({"France", "Germany"}): ("France", 2, 1)}
+
+
 def test_knockout_meeting_probabilities():
     """Pairwise KO-meeting probabilities are computed from the simulated bracket:
     the two group winners always contest the single final, so the final-stage
