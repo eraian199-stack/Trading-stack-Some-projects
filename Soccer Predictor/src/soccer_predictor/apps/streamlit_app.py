@@ -619,19 +619,22 @@ def _wc_ability_leaderboard(include_actual_xi: bool = False, sofa: bool = False)
 @st.cache_data(show_spinner="Simulating that World Cup...", ttl=3600)
 def _wc_past_simulation(
     year: int, n_sims: int, ability_w: float = 0.0, model_label: str = "Elo",
-    host_adv: float = 0.0, sofa: bool = False,
+    host_adv: float = 0.0, sofa: bool = False, from_stage: str = "",
 ) -> dict | None:
     """Groups + full per-team win/advancement probabilities for one past edition.
     The FIFA squad-ability tilt and the host home bump only apply to the Elo engine
     (only Elo has those terms); other models are simulated as-is. ``sofa`` blends in
-    SofaScore club-season ratings (backtested to dilute -- for experimentation)."""
+    SofaScore club-season ratings (backtested to dilute -- for experimentation).
+    ``from_stage`` runs the sim FROM a knockout round with the actual earlier results
+    locked (eliminated teams -> 0)."""
     if model_label == "Elo" and (ability_w > 0 or host_adv > 0):
         adj = _wc_fifa_ability(sofa) if ability_w > 0 else None
         fac = _wc_elo_factory(host_adv=host_adv, ability_by_year=adj, ability_w=ability_w)
         return wc_backtest.simulate_past_world_cup(
-            _live_history(), fac, year, n_simulations=n_sims)
+            _live_history(), fac, year, n_simulations=n_sims, from_stage=from_stage)
     return wc_backtest.simulate_past_world_cup(
-        _live_history(), WC_MODELS[model_label], year, n_simulations=n_sims
+        _live_history(), WC_MODELS[model_label], year, n_simulations=n_sims,
+        from_stage=from_stage,
     )
 
 
@@ -651,16 +654,36 @@ def _actual_finish(team: str, reached: dict | None) -> str:
     return "Group stage"
 
 
+_WC_FROM_STAGE = [
+    ("Pre-tournament (whole tournament)", ""),
+    ("After the group stage (from Round of 16)", "round_of_16"),
+    ("After the Round of 16 (from Quarter-finals)", "quarterfinal"),
+    ("After the Quarter-finals (from Semi-finals)", "semifinal"),
+    ("After the Semi-finals (the final only)", "final"),
+]
+
+
 def _render_past_wc_simulation(
     year: int, n_sims: int, ability_w: float = 0.0, model_label: str = "Elo",
     host_adv: float = 0.0, sofa: bool = False,
 ) -> None:
-    """Groups + pre-tournament win/advancement probabilities for one past edition,
-    shown next to what actually happened (the live tab's view, run on history)."""
-    res = _wc_past_simulation(year, n_sims, ability_w, model_label, host_adv, sofa)
+    """Groups + win/advancement probabilities for one past edition, shown next to what
+    actually happened (the live tab's view, run on history). A checkpoint selector
+    reruns the sim from a chosen knockout round with the real earlier results locked."""
+    labels = [o[0] for o in _WC_FROM_STAGE]
+    pick = st.selectbox("Run simulations from", labels, index=0, key=f"wc_from_{year}",
+                        help="Lock the ACTUAL results up to a point and Monte-Carlo "
+                        "the rest: the real 32-team bracket/draw is reconstructed from "
+                        "that round's true matchups, so eliminated teams drop to 0 and "
+                        "you see the projection from that checkpoint.")
+    from_stage = _WC_FROM_STAGE[labels.index(pick)][1]
+    res = _wc_past_simulation(year, n_sims, ability_w, model_label, host_adv, sofa, from_stage)
     if res is None:
-        st.info("Couldn't reconstruct that edition's groups from the fixtures.")
+        st.info("Couldn't reconstruct that edition (groups/bracket) for that checkpoint.")
         return
+    if from_stage:
+        st.info(f"⏩ Simulating **{pick.lower()}** — earlier rounds locked to the actual "
+                "results; every eliminated team is 0.")
     if host_adv > 0 and year in wc_backtest.WC_HOSTS:
         hosts = ", ".join(wc_backtest.WC_HOSTS[year])
         st.caption(f"🏟️ Host bump +{host_adv:.0f} Elo applied to: {hosts}.")

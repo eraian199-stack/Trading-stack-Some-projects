@@ -291,6 +291,83 @@ def actual_stage_reach(
     return reach
 
 
+def _edition_group_slot_map(matches: pd.DataFrame, groups: dict, fmt) -> dict:
+    """{"1A": team, "2A": team, ...} from an edition's ACTUAL group results."""
+    from ..simulation import rules
+    from ..data.aliases import normalize_team_name
+    gs = matches.sort_values("date", kind="mergesort").head(fmt.n_groups * 6)
+    norm = {str(g).strip().upper(): [normalize_team_name(t) for t in ts]
+            for g, ts in groups.items()}
+    team2group = {t: g for g, ts in norm.items() for t in ts}
+    table = {g: {t: rules.new_standings_row(g, t) for t in ts} for g, ts in norm.items()}
+    played: dict = defaultdict(list)
+    for r in gs.itertuples(index=False):
+        h, a = normalize_team_name(r.home_team), normalize_team_name(r.away_team)
+        g = team2group.get(h)
+        if g is None or a not in table[g]:
+            continue
+        hs, as_ = int(r.home_score), int(r.away_score)
+        rules.apply_result(table[g][h], table[g][a], hs, as_)
+        played[g].append((h, a, hs, as_))
+    slot_map, rng = {}, np.random.default_rng(0)
+    for g in norm:
+        ranked = rules.rank_group(list(table[g].values()), played[g],
+                                  tiebreakers=fmt.group_tiebreakers, rng=rng)
+        for idx, row in enumerate(ranked, start=1):
+            slot_map[f"{idx}{g}"] = row["team"]
+    return slot_map
+
+
+def _edition_ko_matchups(matches: pd.DataFrame, fmt) -> dict | None:
+    """{stage: [(home, away), ...]} of an edition's ACTUAL knockout games, by round
+    (date order; the third-place playoff is dropped by taking the final as last)."""
+    from ..data.aliases import normalize_team_name
+    m = matches.sort_values("date", kind="mergesort").reset_index(drop=True)
+    ko = m.iloc[fmt.n_groups * 6:].reset_index(drop=True)
+    n_ko = fmt.n_groups * fmt.advance_per_group + fmt.n_best_third
+    sizes, t = [], n_ko
+    while t >= 2:
+        sizes.append(t // 2)
+        t //= 2
+    stages = list(fmt.stage_order)
+    if len(sizes) != len(stages) or len(ko) < sum(sizes[:-1]) + 1:
+        return None
+    out, idx = {}, 0
+    for i, stage in enumerate(stages):
+        rows = ko.iloc[idx:idx + sizes[i]] if i < len(stages) - 1 else ko.iloc[-1:]
+        idx += sizes[i] if i < len(stages) - 1 else 0
+        out[stage] = [(normalize_team_name(r.home_team), normalize_team_name(r.away_team))
+                      for r in rows.itertuples(index=False)]
+    return out
+
+
+def _assemble_ko_frame(ko_df: pd.DataFrame, groups: dict, slot_map: dict, fmt) -> pd.DataFrame:
+    """Expand a remaining-bracket result into the full per-team frame: alive teams
+    carry their reach/champion probs (earlier rounds = 1), eliminated teams are 0."""
+    from ..data.aliases import normalize_team_name
+    t2g = {normalize_team_name(t): str(g).strip().upper()
+           for g, ts in groups.items() for t in ts}
+    stages = list(fmt.stage_order)
+    present = [s for s in stages if f"{s}_probability" in ko_df.columns]
+    earlier = stages[:stages.index(present[0])] if present else []
+    ko_map = {normalize_team_name(r["team"]): r for _, r in ko_df.iterrows()}
+    winners = {normalize_team_name(slot_map[f"1{g}"]) for g in set(t2g.values())
+               if slot_map.get(f"1{g}")}
+    rows = []
+    for t, g in t2g.items():
+        r = ko_map.get(t)
+        row = {"team": t, "group": g}
+        for s in stages:
+            row[f"{s}_probability"] = (
+                1.0 if (r is not None and s in earlier)
+                else float(r[f"{s}_probability"]) if (r is not None and f"{s}_probability" in ko_df.columns)
+                else 0.0)
+        row["champion_probability"] = float(r["champion_probability"]) if r is not None else 0.0
+        row["win_group_probability"] = 1.0 if t in winners else 0.0
+        rows.append(row)
+    return pd.DataFrame(rows).sort_values("champion_probability", ascending=False).reset_index(drop=True)
+
+
 def simulate_past_world_cup(
     history: pd.DataFrame,
     model_factory: Callable[[], object],
@@ -298,6 +375,7 @@ def simulate_past_world_cup(
     n_simulations: int = 4000,
     seed: int = 7,
     champions: dict[int, str] | None = None,
+    from_stage: str = "",
 ) -> dict | None:
     """Pre-tournament simulation of ONE past edition -- the live pipeline on history.
 
@@ -329,9 +407,30 @@ def simulate_past_world_cup(
         return None
     model = _make_model(model_factory, year)
     model.fit(train.copy())
-    sims = simulate_tournament(
-        model, groups, n_simulations=n_simulations, seed=seed, fmt=fmt
-    ).reset_index(drop=True)
+    if from_stage:
+        # "Run simulations from a point": lock the ACTUAL results up to `from_stage`
+        # and simulate the remaining bracket from that round's real matchups, so
+        # eliminated teams are 0 and the 32-team draw/progression is exact.
+        from ..data import world_cup
+        from ..simulation.monte_carlo import monte_carlo_knockout
+        ko_matchups = _edition_ko_matchups(matches, fmt)
+        stages = list(fmt.stage_order)
+        if ko_matchups is None or from_stage not in stages:
+            return None
+        start = stages.index(from_stage)
+        rounds = [ko_matchups[s] for s in stages[start:]]
+        built = world_cup.reconstruct_bracket_from_matchups(
+            rounds, stages[start:], tie=fmt.knockout)
+        if built is None:
+            return None
+        fmt2, slot_map2 = built
+        ko = monte_carlo_knockout(model, fmt2, slot_map2, n_simulations=n_simulations, seed=seed)
+        slot_map = _edition_group_slot_map(matches, groups, fmt)  # for win_group + all teams
+        sims = _assemble_ko_frame(ko, groups, slot_map, fmt)
+    else:
+        sims = simulate_tournament(
+            model, groups, n_simulations=n_simulations, seed=seed, fmt=fmt
+        ).reset_index(drop=True)
 
     champ = champions.get(year)
     champ = normalize_team_name(champ) if champ else None

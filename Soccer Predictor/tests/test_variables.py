@@ -225,6 +225,46 @@ def test_combine_ability_blends_only_where_present():
     assert abs(out2["A"] - out["A"]) < 1e-9
 
 
+def test_reconstruct_bracket_from_matchups():
+    """A finished edition's actual round-by-round matchups rebuild the true bracket
+    topology (later rounds reference the prior games whose winners met), label-free."""
+    from soccer_predictor.data import world_cup
+    from soccer_predictor.simulation.monte_carlo import monte_carlo_knockout
+    from soccer_predictor.models.elo_goals import EloGoalsModel
+    t = ["France", "Brazil", "Spain", "England", "Belgium", "Croatia", "Argentina", "Portugal"]
+    rounds = [
+        [(t[0], t[1]), (t[2], t[3]), (t[4], t[5]), (t[6], t[7])],   # QF
+        [(t[0], t[2]), (t[4], t[6])],                               # SF: QF winners
+        [(t[0], t[4])],                                             # final
+    ]
+    built = world_cup.reconstruct_bracket_from_matchups(
+        rounds, ["quarterfinal", "semifinal", "final"])
+    assert built is not None
+    fmt, slot_map = built
+    assert len(set(slot_map.values())) == 8
+    ko = monte_carlo_knockout(EloGoalsModel(), fmt, slot_map, n_simulations=200)
+    assert set(ko["team"]) == set(t)
+    assert abs(ko["champion_probability"].sum() - 1.0) < 1e-9
+    # a later game with a team not traceable to a prior game -> None
+    assert world_cup.reconstruct_bracket_from_matchups(
+        [[("France", "Brazil")], [("France", "Nowhere")]], ["semifinal", "final"]) is None
+
+
+def test_past_wc_from_stage_zeros_eliminated():
+    """Running a past edition FROM the semi-finals leaves exactly the 4 real
+    semifinalists with probability; everyone eliminated earlier is 0."""
+    from soccer_predictor.data import sources
+    from soccer_predictor.evaluation import wc_backtest as wb
+    from soccer_predictor.models.elo_goals import EloGoalsModel
+    res = wb.simulate_past_world_cup(
+        sources.fetch_international_results(), EloGoalsModel, 2018,
+        n_simulations=400, from_stage="semifinal")
+    assert res is not None
+    s = res["sims"]
+    assert (s["champion_probability"] > 1e-9).sum() == 4
+    assert abs(s["champion_probability"].sum() - 1.0) < 1e-9
+
+
 def test_remaining_ko_bracket_reconstructs_and_zeros_eliminated():
     """From the actual current-round matchups, remaining_ko_bracket rebuilds the
     remaining bracket over ONLY the still-alive teams, so monte_carlo_knockout gives

@@ -581,70 +581,73 @@ def completed_ko_results(
     return out
 
 
-_KO_ROUND_BY_COUNT = {8: "round_of_16", 4: "quarterfinal", 2: "semifinal", 1: "final"}
+def _bracket_maps(fmt):
+    """(stage_of, parent, first_stage, round_by_count) for a knockout format.
 
-
-def _wc2026_match_stage() -> dict:
-    from ..simulation import rules
-    st = {m: "round_of_32" for m, _h, _a in rules.WC2026_R32}
-    for stage, matches in rules.WC2026_NEXT_ROUNDS.items():
-        for m, _h, _a in matches:
-            st[m] = stage
-    return st
-
-
-def _wc2026_parent() -> dict:
-    """child match_id -> the later match its winner feeds."""
-    from ..simulation import rules
+    - stage_of:  match_id -> stage
+    - parent:    match_id -> the later match its winner feeds (a source that is a
+      prior match id)
+    - round_by_count: number-of-matches-in-a-stage -> stage (each KO stage has a
+      unique match count: 16=R32, 8=R16, 4=QF, 2=SF, 1=final), used to name the
+      round from the count of fixtures supplied.
+    """
+    from collections import Counter
+    ids = {bm.match_id for bm in fmt.bracket}
+    stage_of = {bm.match_id: bm.stage for bm in fmt.bracket}
     parent: dict = {}
-    for _stage, matches in rules.WC2026_NEXT_ROUNDS.items():
-        for m, s1, s2 in matches:
-            parent[s1] = m
-            parent[s2] = m
-    return parent
+    for bm in fmt.bracket:
+        for src in (bm.home_src, bm.away_src):
+            if src in ids:
+                parent[src] = bm.match_id
+    round_by_count = {n: s for s, n in Counter(bm.stage for bm in fmt.bracket).items()}
+    first_stage = fmt.stage_order[0] if fmt.stage_order else None
+    return stage_of, parent, first_stage, round_by_count
 
 
-def _r32_match_of_slot(slot_code: str, third_assignment: dict | None):
-    from ..simulation import rules
-    for m, h, a in rules.WC2026_R32:
-        if slot_code in (h, a):
-            return m
-    if slot_code.startswith("3") and third_assignment:  # best-third placeholder
-        y = slot_code[1:]
-        for mm, g in third_assignment.items():
-            if g == y:
-                return mm
+def _first_round_match_of_slot(slot_code, third_assignment, fmt, first_stage):
+    for bm in fmt.bracket:
+        if bm.stage != first_stage:
+            continue
+        if slot_code in (bm.home_src, bm.away_src):
+            return bm.match_id
+        for src in (bm.home_src, bm.away_src):  # best-third placeholder "3A/B/.."
+            if src.startswith("3") and "/" in src and third_assignment:
+                if slot_code == "3" + str(third_assignment.get(bm.match_id, "")):
+                    return bm.match_id
     return None
 
 
-def remaining_ko_bracket(slot_map: dict, third_assignment: dict, upcoming_ko: list):
-    """Build a reduced (fmt, slot_map) for simulate_knockout over the rounds STILL to
-    play, from the actual upcoming knockout fixtures.
+def remaining_ko_bracket(slot_map: dict, third_assignment: dict, matchups: list, fmt=None):
+    """Build a reduced ``(fmt, slot_map)`` for ``simulate_knockout`` over the rounds
+    STILL to play, from the ACTUAL matchups of the current knockout round.
 
-    Each current-round fixture is placed at its real WC2026 bracket match (via the
-    two teams' original group slots -> R32 match -> up the tree), so subsequent
-    rounds pair correctly. Only teams still in the bracket appear, so everyone
-    eliminated is absent (probability 0). Returns None if the fixtures don't form
-    one clean, resolvable knockout round (e.g. still in the group stage / R32).
+    Each fixture is placed at its real bracket match (via the two teams' original
+    group slots -> first-round match -> up the tree), so subsequent rounds pair
+    correctly. Only teams still in the bracket appear, so everyone eliminated is
+    absent (probability 0). Works for any groups+knockout ``fmt`` (defaults to the
+    48-team WC2026 format; pass ``world_cup_legacy_format()`` for 1998-2022).
+    Returns None if the fixtures don't form one clean, resolvable knockout round.
     """
     from ..simulation import rules
-    round_name = _KO_ROUND_BY_COUNT.get(len(upcoming_ko))
+    if fmt is None:
+        fmt = rules.world_cup_2026_format()
+    stage_of, parent, first_stage, round_by_count = _bracket_maps(fmt)
+    round_name = round_by_count.get(len(matchups))
     if round_name is None:
         return None
-    stage_of, parent = _wc2026_match_stage(), _wc2026_parent()
     team_to_slot = {normalize_team_name(t): code for code, t in slot_map.items() if t}
 
     def match_in_round(team):
         code = team_to_slot.get(normalize_team_name(team))
         if code is None:
             return None
-        m = _r32_match_of_slot(code, third_assignment)
+        m = _first_round_match_of_slot(code, third_assignment, fmt, first_stage)
         while m is not None and stage_of.get(m) != round_name:
             m = parent.get(m)
         return m
 
     bracket, slot_map2, used = [], {}, set()
-    for home, away in upcoming_ko:
+    for home, away in matchups:
         m = match_in_round(home) or match_in_round(away)
         if m is None or m in used:
             return None
@@ -653,19 +656,57 @@ def remaining_ko_bracket(slot_map: dict, third_assignment: dict, upcoming_ko: li
         slot_map2[f"{m}A"] = normalize_team_name(away)
         bracket.append(rules.BracketMatch(m, f"{m}H", f"{m}A", round_name))
 
-    order = list(rules.WC2026_STAGE_ORDER)
-    if round_name not in order:
-        return None
+    order = list(fmt.stage_order)
     later = order[order.index(round_name) + 1:]
-    for stage in later:
-        for m, s1, s2 in rules.WC2026_NEXT_ROUNDS.get(stage, []):
-            bracket.append(rules.BracketMatch(m, s1, s2, stage))
-    fmt = rules.TournamentFormat(
-        name="wc2026_remaining", kind="knockout",
-        knockout=rules.KnockoutTie(two_leg=False, away_goals=False),
+    for bm in fmt.bracket:
+        if bm.stage in later:
+            bracket.append(bm)  # later rounds keep their real ids/sources (prior winners)
+    fmt2 = rules.TournamentFormat(
+        name=f"{fmt.name}_remaining", kind="knockout", knockout=fmt.knockout,
         bracket=bracket, stage_order=tuple([round_name] + later),
     )
-    return fmt, slot_map2
+    return fmt2, slot_map2
+
+
+def reconstruct_bracket_from_matchups(rounds: list, stage_names: list, tie=None):
+    """Build a ``(fmt, slot_map)`` for ``simulate_knockout`` from a FINISHED edition's
+    ACTUAL matchups round-by-round -- topology inferred from who actually played whom,
+    so it needs no group labels (which are arbitrary when reconstructed).
+
+    ``rounds[0]`` is the round to simulate FROM (its games are seeded with the real
+    teams); each later round's game references the two prior-round games whose winners
+    actually contested it. Returns None if a later game's teams can't be traced to two
+    distinct prior games.
+    """
+    from ..simulation import rules
+    tie = tie or rules.KnockoutTie(two_leg=False, away_goals=False)
+    bracket, slot_map = [], {}
+    prev_ids: list = []
+    prev_teams: list = []
+    for ri, (matchups, stage) in enumerate(zip(rounds, stage_names)):
+        cur_ids, cur_teams = [], []
+        for gi, (home, away) in enumerate(matchups):
+            mid = f"K{ri}_{gi}"
+            if ri == 0:
+                slot_map[f"{mid}H"] = normalize_team_name(home)
+                slot_map[f"{mid}A"] = normalize_team_name(away)
+                bracket.append(rules.BracketMatch(mid, f"{mid}H", f"{mid}A", stage))
+            else:
+                hp = next((p for p, ts in zip(prev_ids, prev_teams)
+                           if normalize_team_name(home) in ts), None)
+                ap = next((p for p, ts in zip(prev_ids, prev_teams)
+                           if normalize_team_name(away) in ts), None)
+                if hp is None or ap is None or hp == ap:
+                    return None
+                bracket.append(rules.BracketMatch(mid, hp, ap, stage))
+            cur_ids.append(mid)
+            cur_teams.append({normalize_team_name(home), normalize_team_name(away)})
+        prev_ids, prev_teams = cur_ids, cur_teams
+    fmt = rules.TournamentFormat(
+        name="reconstructed", kind="knockout", knockout=tie,
+        bracket=bracket, stage_order=tuple(stage_names),
+    )
+    return fmt, slot_map
 
 
 # --------------------------------------------------------------------------- #
