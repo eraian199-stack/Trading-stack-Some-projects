@@ -22,6 +22,7 @@ import pandas as pd
 from ..data.aliases import normalize_team_name
 from ..models.base import ScorelineModel
 from . import rules
+from .knockout import simulate_knockout
 from .league import simulate_league
 from .tournament import simulate_tournament_once
 
@@ -158,6 +159,45 @@ def knockout_meeting_probabilities(
     frame = pd.DataFrame(rows)
     if not frame.empty:
         frame = frame.sort_values("meet_probability", ascending=False).reset_index(drop=True)
+    return frame
+
+
+def monte_carlo_knockout(
+    model: ScorelineModel,
+    fmt: rules.TournamentFormat,
+    slot_map: dict[str, str],
+    n_simulations: int = 5000,
+    seed: int = 7,
+    third_assignment: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """Monte-Carlo a pure knockout bracket whose teams are ALREADY placed in
+    ``slot_map`` (e.g. the remaining rounds of a tournament in progress). Only teams
+    in the bracket appear -- everyone eliminated is absent -- so it is the engine for
+    conditioning the live sim on who is actually still alive. Returns one row per
+    bracket team with a ``<stage>_probability`` column per ``fmt.stage_order`` plus
+    ``champion_probability``, sorted by champion probability."""
+    rng = np.random.default_rng(seed)
+    n = int(n_simulations)
+    stages = list(fmt.stage_order)
+    reach: dict[str, Counter[str]] = defaultdict(Counter)
+    teams = sorted({t for t in slot_map.values() if t})
+    for _ in range(n):
+        reached, _ = simulate_knockout(model, fmt, slot_map, third_assignment or {}, rng)
+        for stage in stages:
+            for t in set(reached.get(stage, [])):
+                reach[t][stage] += 1
+        for t in reached.get("champion", []):
+            reach[t]["champion"] += 1
+    denom = float(n) if n > 0 else 1.0
+    rows = []
+    for t in teams:
+        row: dict[str, Any] = {"team": t}
+        for s in stages + ["champion"]:
+            row[f"{s}_probability"] = reach[t][s] / denom
+        rows.append(row)
+    frame = pd.DataFrame(rows)
+    if "champion_probability" in frame.columns and not frame.empty:
+        frame = frame.sort_values("champion_probability", ascending=False).reset_index(drop=True)
     return frame
 
 

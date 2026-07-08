@@ -581,6 +581,93 @@ def completed_ko_results(
     return out
 
 
+_KO_ROUND_BY_COUNT = {8: "round_of_16", 4: "quarterfinal", 2: "semifinal", 1: "final"}
+
+
+def _wc2026_match_stage() -> dict:
+    from ..simulation import rules
+    st = {m: "round_of_32" for m, _h, _a in rules.WC2026_R32}
+    for stage, matches in rules.WC2026_NEXT_ROUNDS.items():
+        for m, _h, _a in matches:
+            st[m] = stage
+    return st
+
+
+def _wc2026_parent() -> dict:
+    """child match_id -> the later match its winner feeds."""
+    from ..simulation import rules
+    parent: dict = {}
+    for _stage, matches in rules.WC2026_NEXT_ROUNDS.items():
+        for m, s1, s2 in matches:
+            parent[s1] = m
+            parent[s2] = m
+    return parent
+
+
+def _r32_match_of_slot(slot_code: str, third_assignment: dict | None):
+    from ..simulation import rules
+    for m, h, a in rules.WC2026_R32:
+        if slot_code in (h, a):
+            return m
+    if slot_code.startswith("3") and third_assignment:  # best-third placeholder
+        y = slot_code[1:]
+        for mm, g in third_assignment.items():
+            if g == y:
+                return mm
+    return None
+
+
+def remaining_ko_bracket(slot_map: dict, third_assignment: dict, upcoming_ko: list):
+    """Build a reduced (fmt, slot_map) for simulate_knockout over the rounds STILL to
+    play, from the actual upcoming knockout fixtures.
+
+    Each current-round fixture is placed at its real WC2026 bracket match (via the
+    two teams' original group slots -> R32 match -> up the tree), so subsequent
+    rounds pair correctly. Only teams still in the bracket appear, so everyone
+    eliminated is absent (probability 0). Returns None if the fixtures don't form
+    one clean, resolvable knockout round (e.g. still in the group stage / R32).
+    """
+    from ..simulation import rules
+    round_name = _KO_ROUND_BY_COUNT.get(len(upcoming_ko))
+    if round_name is None:
+        return None
+    stage_of, parent = _wc2026_match_stage(), _wc2026_parent()
+    team_to_slot = {normalize_team_name(t): code for code, t in slot_map.items() if t}
+
+    def match_in_round(team):
+        code = team_to_slot.get(normalize_team_name(team))
+        if code is None:
+            return None
+        m = _r32_match_of_slot(code, third_assignment)
+        while m is not None and stage_of.get(m) != round_name:
+            m = parent.get(m)
+        return m
+
+    bracket, slot_map2, used = [], {}, set()
+    for home, away in upcoming_ko:
+        m = match_in_round(home) or match_in_round(away)
+        if m is None or m in used:
+            return None
+        used.add(m)
+        slot_map2[f"{m}H"] = normalize_team_name(home)
+        slot_map2[f"{m}A"] = normalize_team_name(away)
+        bracket.append(rules.BracketMatch(m, f"{m}H", f"{m}A", round_name))
+
+    order = list(rules.WC2026_STAGE_ORDER)
+    if round_name not in order:
+        return None
+    later = order[order.index(round_name) + 1:]
+    for stage in later:
+        for m, s1, s2 in rules.WC2026_NEXT_ROUNDS.get(stage, []):
+            bracket.append(rules.BracketMatch(m, s1, s2, stage))
+    fmt = rules.TournamentFormat(
+        name="wc2026_remaining", kind="knockout",
+        knockout=rules.KnockoutTie(two_leg=False, away_goals=False),
+        bracket=bracket, stage_order=tuple([round_name] + later),
+    )
+    return fmt, slot_map2
+
+
 # --------------------------------------------------------------------------- #
 # One-call live simulation
 # --------------------------------------------------------------------------- #

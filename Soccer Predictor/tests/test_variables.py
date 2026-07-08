@@ -225,6 +225,31 @@ def test_combine_ability_blends_only_where_present():
     assert abs(out2["A"] - out["A"]) < 1e-9
 
 
+def test_remaining_ko_bracket_reconstructs_and_zeros_eliminated():
+    """From the actual current-round matchups, remaining_ko_bracket rebuilds the
+    remaining bracket over ONLY the still-alive teams, so monte_carlo_knockout gives
+    probabilities to exactly those teams (everyone eliminated is absent -> 0)."""
+    from soccer_predictor.data import world_cup
+    from soccer_predictor.simulation import rules
+    from soccer_predictor.simulation.tournament import simulate_tournament_once
+    from soccer_predictor.simulation.monte_carlo import monte_carlo_knockout
+    from soccer_predictor.models.elo_goals import EloGoalsModel
+    groups = {chr(65 + i): [f"T{i}_{j}" for j in range(4)] for i in range(12)}
+    fmt = rules.world_cup_2026_format()
+    res = simulate_tournament_once(EloGoalsModel(), fmt, groups, np.random.default_rng(1))
+    qf = [(m.home_team, m.away_team) for m in res["matches"] if m.stage == "quarterfinal"]
+    assert len(qf) == 4
+    built = world_cup.remaining_ko_bracket(res["slot_map"], res["third_assignment"], qf)
+    assert built is not None
+    fmt2, slot_map2 = built
+    assert fmt2.stage_order == ("quarterfinal", "semifinal", "final")
+    ko = monte_carlo_knockout(EloGoalsModel(), fmt2, slot_map2, n_simulations=200)
+    assert set(ko["team"]) == set(slot_map2.values()) and len(set(slot_map2.values())) == 8
+    assert abs(ko["champion_probability"].sum() - 1.0) < 1e-9
+    # wrong number of fixtures -> not a clean round -> None
+    assert world_cup.remaining_ko_bracket(res["slot_map"], res["third_assignment"], qf[:3]) is None
+
+
 def test_known_results_lock_knockout_and_zero_eliminated():
     """Locking an actual knockout result makes the winner champion in 100% of runs
     and the loser 0% -- i.e. an eliminated team drops to zero."""

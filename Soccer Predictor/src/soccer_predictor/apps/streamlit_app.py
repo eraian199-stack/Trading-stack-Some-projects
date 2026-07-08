@@ -1263,6 +1263,61 @@ def _live_r32_third_pins(fingerprint: str, as_of: str = "") -> dict:
         return {}
 
 
+def _assemble_live_ko_frame(ko_df, groups: dict, slot_map: dict) -> pd.DataFrame:
+    """Expand a remaining-bracket result into the full live frame: alive teams carry
+    their reach/champion probs (earlier stages = 1, they got there), every eliminated
+    team is 0, and win_group is the actual group result."""
+    from ..data.aliases import normalize_team_name
+    t2g = {normalize_team_name(t): str(g).strip().upper()
+           for g, teams in groups.items() for t in teams}
+    stage_cols = ["round_of_32", "round_of_16", "quarterfinal", "semifinal", "final"]
+    present = [s for s in stage_cols if f"{s}_probability" in ko_df.columns]
+    earlier = stage_cols[:stage_cols.index(present[0])] if present else []
+    ko_map = {normalize_team_name(r["team"]): r for _, r in ko_df.iterrows()}
+    winners = {normalize_team_name(slot_map[f"1{g}"]) for g in set(t2g.values())
+               if slot_map.get(f"1{g}")}
+    rows = []
+    for t, g in t2g.items():
+        row = {"team": t, "group": g}
+        r = ko_map.get(t)
+        for s in stage_cols:
+            row[f"{s}_probability"] = (1.0 if (r is not None and s in earlier)
+                                       else float(r[f"{s}_probability"]) if (r is not None and f"{s}_probability" in ko_df.columns)
+                                       else 0.0)
+        row["champion_probability"] = float(r["champion_probability"]) if r is not None else 0.0
+        row["win_group_probability"] = 1.0 if t in winners else 0.0
+        rows.append(row)
+    return pd.DataFrame(rows).sort_values("champion_probability", ascending=False).reset_index(drop=True)
+
+
+def _remaining_ko_frame(model, groups, fixtures, third_assignment: dict, n_sims: int):
+    """If the tournament is in the knockout rounds, simulate ONLY the actual remaining
+    bracket (from the live upcoming fixtures) so eliminated teams are absent (0).
+    Returns the full live frame, or None if not cleanly in a KO round."""
+    try:
+        import numpy as np
+        from ..simulation.group_stage import simulate_group_stage
+        from ..simulation.monte_carlo import monte_carlo_knockout
+        odds = _live_odds(odds_api.WORLD_CUP_SPORT, "avg")
+        if odds.empty:
+            return None
+        grp = world_cup.group_pair_keys(groups)
+        upcoming = [(r.home_team, r.away_team) for r in odds.itertuples(index=False)
+                    if world_cup._pair_key(r.home_team, r.away_team) not in grp]
+        if not upcoming:
+            return None
+        _, slot_map, _, _ = simulate_group_stage(
+            EloGoalsModel(), groups, np.random.default_rng(0), fixtures=fixtures, n_best_third=8)
+        built = world_cup.remaining_ko_bracket(slot_map, third_assignment, upcoming)
+        if built is None:
+            return None
+        fmt2, slot_map2 = built
+        ko = monte_carlo_knockout(model, fmt2, slot_map2, n_simulations=n_sims)
+        return _assemble_live_ko_frame(ko, groups, slot_map)
+    except Exception:
+        return None
+
+
 @st.cache_data(show_spinner="Simulating World Cup 2026...", ttl=900)
 def _live_wc(
     model_label: str, n_sims: int, anchor: bool, fingerprint: str,
@@ -1280,6 +1335,13 @@ def _live_wc(
                 model = MarketAnchoredModel(model, weight=0.5, odds=odds)
         except Exception:
             pass  # no odds/key -> pure model
+    # Once the knockouts are under way (Now), simulate the ACTUAL remaining bracket
+    # from the live fixtures so every eliminated team is 0 -- robust to the feeds
+    # only surfacing a rolling window of KO results.
+    if not as_of:
+        remaining = _remaining_ko_frame(model, groups, fixtures, dict(third_pins), n_sims)
+        if remaining is not None:
+            return remaining
     from ..simulation.tournament import simulate_tournament
 
     return simulate_tournament(
